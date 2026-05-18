@@ -90,13 +90,15 @@ def _normalize(items: list[dict]) -> list[dict]:
     return out
 
 
-def _count_suffix(n: int, avoid: list[str] | None = None) -> str:
+def _count_suffix(n: int, avoid: list[str] | None = None,
+                  avoid_recent: int = 80) -> str:
     s = f"\n\nTam olarak {n} adet ihlal üret."
     if avoid:
-        # Sadece title bazlı kısa liste; çok uzun olmasın diye ilk 50 ile sınırla
+        # Son `avoid_recent` ihlali yasakla — en yeni başlıklar tekrar etmesin diye
+        tail = avoid[-avoid_recent:] if len(avoid) > avoid_recent else avoid
         s += (
             "\nAşağıdaki ihlalleri TEKRARLAMA, bunlardan farklı olanları üret:\n- "
-            + "\n- ".join(avoid[:50])
+            + "\n- ".join(tail)
         )
     return s
 
@@ -202,7 +204,7 @@ def generate_rag(
     return _normalize(data.get("violations", []))
 
 
-CHUNK_SIZE = 30
+CHUNK_SIZE = 40
 
 
 def generate_chunked(
@@ -216,16 +218,27 @@ def generate_chunked(
     context_chunks: list[dict] | None = None,
     ft_model_id: str | None = None,
     chunk_size: int = CHUNK_SIZE,
+    progress_callback=None,
 ) -> list[dict]:
-    """N büyükse birden çok çağrıda üretir. Aralarda mevcut başlıkları
-    avoid_titles olarak ekler, mükerrer cevabı azaltır."""
+    """N büyükse birden çok çağrıda üretir. Aralarda gelen başlıkları
+    avoid_titles'a eklemeye devam eder; sonraki partilerde tekrar
+    üretilmemesi için."""
     from .config import METHOD_NAIVE, METHOD_OPTIMIZED, METHOD_RAG, METHOD_FINETUNE
 
     accumulated: list[dict] = []
     avoid = list(avoid_titles or [])
     remaining = int(n)
+    chunk_size = max(1, int(chunk_size))
+    total_chunks = (remaining + chunk_size - 1) // chunk_size
+    chunk_idx = 0
     while remaining > 0:
         batch = min(chunk_size, remaining)
+        chunk_idx += 1
+        if progress_callback:
+            try:
+                progress_callback(chunk_idx, total_chunks, batch)
+            except Exception:
+                pass
         if method == METHOD_NAIVE:
             items = generate_naive(user_prompt, model=model, n=batch,
                                    avoid_titles=avoid, usage_meta=usage_meta)
@@ -246,7 +259,7 @@ def generate_chunked(
         if not items:
             break  # boş cevap → erken çık (sonsuz döngüye girme)
         accumulated.extend(items)
-        # Bu turda gelenleri sonraki turlarda yasakla
+        # Yeni başlıkları avoid'a ekle (next partide tekrar gelmesin)
         for it in items:
             t = (it.get("title") or it.get("description") or "").strip()
             if t and t not in avoid:

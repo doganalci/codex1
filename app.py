@@ -215,8 +215,19 @@ with tab_run:
         )
         name = st.text_input("Çalıştırma adı", value="run-1")
 
-    n_violations = st.number_input(
-        "Üretilecek ihlal sayısı", min_value=1, max_value=200, value=20, step=1
+    nv_c1, nv_c2 = st.columns([2, 1])
+    n_violations = nv_c1.number_input(
+        "Üretilecek ihlal sayısı", min_value=1, max_value=1000, value=20, step=1,
+    )
+    chunk_size = nv_c2.number_input(
+        "Parti boyutu (chunk)", min_value=5, max_value=100, value=40, step=5,
+        help="Her LLM çağrısında üretilecek ihlal sayısı. Toplam istek "
+             "= ceil(toplam / parti). max_tokens'a takılmamak için ≤ ~50.",
+    )
+    n_calls_est = (int(n_violations) + int(chunk_size) - 1) // int(chunk_size)
+    st.caption(
+        f"📦 **{int(n_violations)}** ihlal · **{int(chunk_size)}**'lik partiler → "
+        f"yaklaşık **{n_calls_est}** LLM çağrısı."
     )
 
     # Prompt: Method 1 has its own; Methods 2, 3 and 4 share the same prompt
@@ -341,24 +352,34 @@ with tab_run:
             ]
 
         umeta = {"pool_run_id": run_id}
+        prog_bar = st.progress(0.0)
+        prog_text = st.empty()
+
+        def _pool_cb(idx, total, batch):
+            prog_bar.progress(min(1.0, idx / max(1, total)))
+            prog_text.text(f"Parti {idx}/{total} · {batch} ihlal isteniyor...")
+
         try:
-            with st.spinner("LLM çalışıyor..."):
-                rag_chunks = None
-                if method == METHOD_RAG:
-                    rag_chunks = rag.retrieve(rag_collection, prompt, k=top_k,
-                                              usage_meta=umeta)
-                    if not rag_chunks:
-                        st.warning("RAG koleksiyonu boş veya eşleşme yok.")
-                items = llm.generate_chunked(
-                    method=method,
-                    user_prompt=prompt,
-                    model=(effective_llm if method != METHOD_FINETUNE else None),
-                    n=int(n_violations),
-                    avoid_titles=avoid_titles,
-                    usage_meta=umeta,
-                    context_chunks=rag_chunks,
-                    ft_model_id=(effective_llm if method == METHOD_FINETUNE else None),
-                )
+            rag_chunks = None
+            if method == METHOD_RAG:
+                rag_chunks = rag.retrieve(rag_collection, prompt, k=top_k,
+                                          usage_meta=umeta)
+                if not rag_chunks:
+                    st.warning("RAG koleksiyonu boş veya eşleşme yok.")
+            items = llm.generate_chunked(
+                method=method,
+                user_prompt=prompt,
+                model=(effective_llm if method != METHOD_FINETUNE else None),
+                n=int(n_violations),
+                avoid_titles=avoid_titles,
+                usage_meta=umeta,
+                context_chunks=rag_chunks,
+                ft_model_id=(effective_llm if method == METHOD_FINETUNE else None),
+                chunk_size=int(chunk_size),
+                progress_callback=_pool_cb,
+            )
+            prog_bar.progress(1.0)
+            prog_text.text(f"{len(items)} ihlal üretildi.")
         except Exception as e:
             st.error(f"Hata: {e}")
             st.stop()
@@ -886,17 +907,72 @@ with top_ifc:
             "sekmesi açık kalsın."
         )
 
-        # Pool seç
-        saved_pools = [r for r in storage.list_runs() if r["status"] == "saved"]
-        if not saved_pools:
-            st.warning("Önce bir kayıtlı ihlal havuzu lazım.")
-        ppo = {r["id"]: f"{r['name']} · {METHOD_LABELS.get(r['method'], r['method'])}"
-               for r in saved_pools}
-        pipe_pool = st.selectbox(
-            "Havuz", list(ppo.keys()) or [""],
-            format_func=lambda k: ppo.get(k, "-"),
-            key="pipe_pool",
+        # Havuz: mevcut veya pipeline içinde üret
+        pool_src = st.radio(
+            "İhlal havuzu kaynağı",
+            ["Mevcut havuzu kullan", "Pipeline başında yeni havuz üret"],
+            horizontal=True, key="pipe_pool_src",
         )
+
+        pipe_pool = None
+        pool_create_cfg: dict | None = None
+
+        if pool_src == "Mevcut havuzu kullan":
+            saved_pools = [r for r in storage.list_runs() if r["status"] == "saved"]
+            if not saved_pools:
+                st.warning("Önce bir kayıtlı ihlal havuzu lazım.")
+            ppo = {r["id"]: f"{r['name']} · {METHOD_LABELS.get(r['method'], r['method'])}"
+                   for r in saved_pools}
+            pipe_pool = st.selectbox(
+                "Havuz", list(ppo.keys()) or [""],
+                format_func=lambda k: ppo.get(k, "-"),
+                key="pipe_pool",
+            )
+        else:
+            st.markdown("**Havuz üretim parametreleri** (pipeline başında çalışır)")
+            pmc1, pmc2 = st.columns(2)
+            pc_method = pmc1.selectbox(
+                "Yöntem", [METHOD_NAIVE, METHOD_OPTIMIZED, METHOD_RAG, METHOD_FINETUNE],
+                format_func=lambda m: METHOD_LABELS[m],
+                index=2, key="pipe_pc_method",
+            )
+            pc_name = pmc2.text_input("Havuz adı", value="auto-pool",
+                                       key="pipe_pc_name")
+            pc_prompt = st.text_area(
+                "Havuz promtu",
+                value=llm.default_prompt_for(pc_method),
+                height=100, key="pipe_pc_prompt",
+            )
+            pc1, pc2, pc3 = st.columns(3)
+            pc_n = pc1.number_input("İhlal sayısı", 10, 5000, 200,
+                                     key="pipe_pc_n")
+            pc_chunk = pc2.number_input("Parti boyutu", 5, 100, 40,
+                                         key="pipe_pc_chunk")
+            pc_model = pc3.text_input("LLM modeli",
+                                       value=settings.llm_model,
+                                       key="pipe_pc_model")
+            pc_coll = None
+            pc_topk = 8
+            pc_ft_id = None
+            if pc_method == METHOD_RAG:
+                colls = rag.list_collections()
+                if not colls:
+                    st.warning("RAG için koleksiyon yok.")
+                pc_coll = st.selectbox("RAG koleksiyonu", colls or [""],
+                                        key="pipe_pc_coll")
+                pc_topk = st.slider("top-k", 3, 20, 8, key="pipe_pc_topk")
+            elif pc_method == METHOD_FINETUNE:
+                pc_ft_id = st.text_input("FT model id", key="pipe_pc_ft")
+
+            pool_create_cfg = {
+                "method": pc_method, "prompt": pc_prompt,
+                "n_violations": int(pc_n), "chunk_size": int(pc_chunk),
+                "model": pc_model.strip() or None,
+                "rag_collection": pc_coll, "top_k": int(pc_topk),
+                "finetune_model_id": pc_ft_id,
+                "embedding_model": settings.embedding_model if pc_method == METHOD_RAG else None,
+                "name": pc_name,
+            }
 
         # Baseline kaynağı
         bsource = st.radio(
@@ -979,8 +1055,10 @@ with top_ifc:
             "(çok kaba tahmin, fiili tüketim farklı olabilir)."
         )
 
+        has_pool = bool(pipe_pool) or pool_create_cfg is not None
+        has_baseline_src = bool(existing_ids) or bsource == "Yeni üret"
         if st.button("🚀 Pipeline başlat", type="primary",
-                     disabled=not (pipe_pool and (existing_ids or bsource == "Yeni üret"))):
+                     disabled=not (has_pool and has_baseline_src)):
             prog_bar = st.progress(0.0)
             status_text = st.empty()
             log_area = st.empty()
@@ -992,12 +1070,12 @@ with top_ifc:
                 line = f"[{phase}] {cur}/{total} {msg}"
                 status_text.text(line)
                 log_lines.append(line)
-                # Son 12 satırı göster
-                log_area.code("\n".join(log_lines[-12:]))
+                log_area.code("\n".join(log_lines[-15:]))
 
             try:
                 res = pipeline.run_pipeline(
                     pool_run_id=pipe_pool,
+                    pool_create=pool_create_cfg,
                     n_baselines=int(n_baselines),
                     variants_per_baseline=int(variants),
                     violations_per_variant=int(vio_per),
@@ -1012,8 +1090,16 @@ with top_ifc:
                     existing_baseline_ids=existing_ids or None,
                 )
                 s = res["summary"]
+                pool_info = ""
+                if res.get("pool_generated"):
+                    pg = res["pool_generated"]
+                    pool_info = (
+                        f"- Yeni havuz: **{pg['name']}** "
+                        f"({pg['items']} ihlal)\n"
+                    )
                 st.success(
                     f"✓ Pipeline tamamlandı.\n"
+                    f"{pool_info}"
                     f"- Baseline (OK): **{s['baselines_ok']}**\n"
                     f"- İhlalli IFC üretildi: **{s['variated']}**\n"
                     f"- Toplam uygulanan ihlal: **{s['total_applied']}**\n"

@@ -14,7 +14,8 @@ from __future__ import annotations
 import random
 from typing import Callable
 
-from . import ifc_gen, ifc_inject, storage
+from . import ifc_gen, ifc_inject, llm, rag, storage
+from .config import METHOD_LABELS
 
 
 ProgressCB = Callable[[str, int, int, str], None]
@@ -38,7 +39,9 @@ def estimate_tokens(
 
 def run_pipeline(
     *,
-    pool_run_id: str,
+    pool_run_id: str | None = None,
+    # Opsiyonel: pool_run_id yoksa pipeline kendi havuzunu üretir
+    pool_create: dict | None = None,
     n_baselines: int = 4,
     variants_per_baseline: int = 3,
     violations_per_variant: int = 10,
@@ -65,16 +68,64 @@ def run_pipeline(
         if progress_callback:
             progress_callback(phase, cur, total, msg)
 
-    pool_vs = storage.get_violations(pool_run_id)
-    if not pool_vs:
-        raise ValueError("Boş havuz")
-
     results: dict = {
+        "pool_run_id": pool_run_id,
         "baselines": [],
         "variated": [],
         "errors": [],
         "summary": {},
     }
+
+    # ---- 0) Havuz aşaması (opsiyonel) ----
+    if not pool_run_id and pool_create:
+        pc = pool_create
+        method = pc["method"]
+        prompt_text = pc["prompt"]
+        n_violations = int(pc.get("n_violations", 100))
+        chunk_size = int(pc.get("chunk_size", 40))
+        gen_model = pc.get("model") or None
+        coll = pc.get("rag_collection")
+        top_k = int(pc.get("top_k", 8))
+        ft_id = pc.get("finetune_model_id")
+        run_name = pc.get("name") or f"{name_prefix}-pool"
+
+        rid = storage.create_run(
+            name=run_name, method=method, prompt=prompt_text,
+            llm_model=gen_model or "default",
+            embedding_model=pc.get("embedding_model"),
+            rag_collection=coll, rag_documents=None,
+            finetune_model_id=ft_id,
+        )
+        umeta = {"pool_run_id": rid}
+        rag_chunks = None
+        if method == "rag" and coll:
+            rag_chunks = rag.retrieve(coll, prompt_text, k=top_k, usage_meta=umeta)
+
+        def _pool_cb(idx, total, batch):
+            _emit("pool", idx, total, f"{batch} ihlal isteniyor (parti {idx}/{total})")
+
+        items = llm.generate_chunked(
+            method=method, user_prompt=prompt_text,
+            model=(gen_model if method != "finetune" else None),
+            n=n_violations, avoid_titles=None, usage_meta=umeta,
+            context_chunks=rag_chunks,
+            ft_model_id=(gen_model if method == "finetune" else None),
+            chunk_size=chunk_size,
+            progress_callback=_pool_cb,
+        )
+        storage.add_violations(rid, items)
+        storage.mark_saved(rid)
+        pool_run_id = rid
+        results["pool_run_id"] = rid
+        results["pool_generated"] = {
+            "run_id": rid, "items": len(items), "name": run_name,
+        }
+
+    if not pool_run_id:
+        raise ValueError("pool_run_id veya pool_create gerekli")
+    pool_vs = storage.get_violations(pool_run_id)
+    if not pool_vs:
+        raise ValueError("Boş havuz")
 
     # ---- 1) Baseline aşaması ----
     baseline_ids: list[str] = []
