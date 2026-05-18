@@ -31,20 +31,31 @@ KESİN KURALLAR:
 - Çıktı yalnızca SPF (STEP) metni olsun. Markdown kod bloğu ya da açıklama YAZMA.
 - Dosya `ISO-10303-21;` ile başlasın, `END-ISO-10303-21;` ile bitsin.
 - FILE_SCHEMA(('IFC4')) kullan.
-- En az şu objeleri içersin: IfcProject, IfcSite, IfcBuilding, IfcBuildingStorey,
-  IfcWallStandardCase (en az 4), IfcSlab (zemin), IfcDoor (en az 2),
-  IfcWindow (en az 2), ilgili IfcLocalPlacement, IfcAxis2Placement3D,
-  IfcCartesianPoint, IfcDirection, IfcOwnerHistory, IfcUnitAssignment.
-- Tüm GUID'ler 22 karakter base64 (IfcGloballyUniqueId) olsun, birbirinden farklı.
-- Eleman boyutları cömert olsun (KESİNLİKLE ihlal içermesin):
+- ZORUNLU ENTİTELER (eksiksiz olmalı, yoksa cevap REDDEDİLİR):
+  * 1 IfcProject (Units: IfcUnitAssignment ile METRE/RADIAN)
+  * 1 IfcSite
+  * 1 IfcBuilding
+  * 1+ IfcBuildingStorey
+  * 1+ IfcSpace (oda)
+  * IfcRelAggregates ile hiyerarşi: Project→Site→Building→Storey
+  * IfcRelContainedInSpatialStructure ile Storey→fiziksel elemanlar
+  * 4+ IfcWallStandardCase (her duvar IfcExtrudedAreaSolid ile geometriye sahip)
+  * 1+ IfcSlab (zemin)
+  * 2+ IfcDoor (her birinin IfcRelFillsElement ile bir IfcOpeningElement'i)
+  * 2+ IfcWindow
+  * IfcRelSpaceBoundary ile duvarların hangi Space'i sınırladığı
+  * Her IfcProduct için IfcLocalPlacement (IfcAxis2Placement3D + IfcCartesianPoint + IfcDirection)
+  * 1 IfcOwnerHistory
+- Tüm GlobalId'ler 22 karakter benzersiz IfcGloballyUniqueId.
+- Eleman boyutları KESİNLİKLE ihlal İÇERMESİN (cömert):
   * Kapı genişliği ≥ 1.00 m, yüksekliği ≥ 2.10 m
   * Pencere ≥ 1.20 × 1.20 m
   * Tavan yüksekliği ≥ 3.00 m
   * Duvar kalınlığı ≥ 0.20 m
   * Koridor genişliği ≥ 1.50 m (varsa)
-- Geometri tutarlı olsun (placement zinciri, units 'METRE').
+- Geometri tutarlı (placement zinciri, units 'METRE').
 
-Sadece dosya içeriğini döndür."""
+Cevap olarak yalnızca dosya içeriğini döndür."""
 
 
 def _client() -> OpenAI:
@@ -84,7 +95,7 @@ def _ask_llm(user_prompt: str, model: str, retry_error: str | None = None,
         model=model,
         messages=msgs,
         temperature=0.4,
-        max_tokens=12000,
+        max_tokens=16000,
     )
     from . import storage
     storage.record_usage_from_openai(
@@ -155,6 +166,69 @@ def generate_baseline(
     return {"ifc_model_id": mid, "ifc_path": str(ifc_path),
             "meta_path": str(meta_path), "graph_path": graph_path,
             "status": status, "error": err}
+
+
+def import_real_ifc(
+    *,
+    src_path: str | Path,
+    name: str | None = None,
+) -> dict:
+    """Dışarıdan gerçek bir IFC dosyasını projeye al; graph ve meta üret;
+    storage'a kind='imported' olarak kaydet.
+    """
+    from . import storage, ifc_graph as _ifc_graph
+    import shutil
+
+    src = Path(src_path)
+    if not src.exists():
+        raise FileNotFoundError(str(src))
+
+    ifc_id = str(uuid.uuid4())
+    out_dir = settings.ifc_dir / "imports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ifc_path = out_dir / f"{ifc_id}.ifc"
+    shutil.copyfile(src, ifc_path)
+
+    ok, err = _try_open(ifc_path)
+    status = "ok" if ok else "invalid"
+
+    graph_path = None
+    if ok:
+        try:
+            gp = out_dir / f"{ifc_id}.graph.json"
+            _ifc_graph.build_and_save(ifc_path, gp)
+            graph_path = str(gp)
+        except Exception:
+            graph_path = None
+
+    meta_path = out_dir / f"{ifc_id}.meta.json"
+    meta = {
+        "ifc_id": ifc_id,
+        "name": name or src.name,
+        "kind": "imported",
+        "source_filename": src.name,
+        "status": status,
+        "error": err,
+        "created_at": datetime.utcnow().isoformat(timespec="seconds"),
+    }
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    mid = storage.create_ifc_model(
+        id=ifc_id,
+        kind="imported", name=(name or src.name), parent_id=None,
+        llm_model="-", prompt=None, pool_run_id=None,
+        params={"source_filename": src.name},
+        file_path=str(ifc_path), meta_path=str(meta_path),
+        labels_path=None, graph_path=graph_path,
+        status=status, error=err,
+    )
+    return {
+        "ifc_model_id": mid, "ifc_path": str(ifc_path),
+        "meta_path": str(meta_path), "graph_path": graph_path,
+        "status": status, "error": err,
+    }
 
 
 def generate_baselines(

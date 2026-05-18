@@ -33,12 +33,21 @@ def graph_to_figure(
     if g.number_of_nodes() == 0:
         raise ValueError("Boş graf.")
 
-    # Spring layout için undirected simple graph kopyası
-    simple = nx.Graph()
-    simple.add_nodes_from(g.nodes(data=True))
-    for u, v, d in g.edges(data=True):
-        simple.add_edge(u, v, rel=d.get("rel"))
-    pos = nx.spring_layout(simple, seed=seed, k=1.4 / max(1, simple.number_of_nodes() ** 0.5))
+    # Pozisyonlar graph'ta gömülü mü? (ifc_graph._embed_layout)
+    has_pos = all(
+        "x" in g.nodes[n] and "y" in g.nodes[n] for n in g.nodes
+    )
+    if has_pos:
+        pos = {n: (g.nodes[n]["x"], g.nodes[n]["y"]) for n in g.nodes}
+    else:
+        simple = nx.Graph()
+        simple.add_nodes_from(g.nodes(data=True))
+        for u, v, d in g.edges(data=True):
+            simple.add_edge(u, v, rel=d.get("rel"))
+        pos = nx.spring_layout(
+            simple, seed=seed,
+            k=1.4 / max(1, simple.number_of_nodes() ** 0.5),
+        )
 
     # Edges: gruplandırılmış (her rel tipi ayrı trace)
     edge_traces = []

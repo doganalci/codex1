@@ -27,6 +27,7 @@ class Settings:
         self.export_dir.mkdir(parents=True, exist_ok=True)
         (self.ifc_dir / "baseline").mkdir(parents=True, exist_ok=True)
         (self.ifc_dir / "violated").mkdir(parents=True, exist_ok=True)
+        (self.ifc_dir / "imports").mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

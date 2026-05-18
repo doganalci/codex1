@@ -142,7 +142,27 @@ def build_graph(ifc_path: str | Path) -> nx.MultiDiGraph:
 
     g.graph["n_nodes"] = g.number_of_nodes()
     g.graph["n_edges"] = g.number_of_edges()
+    _embed_layout(g)
     return g
+
+
+def _embed_layout(g, seed: int = 7) -> None:
+    """Spring layout pozisyonlarını node attribute'u olarak göm (x,y).
+
+    Böylece her görselleştirmede yeniden hesaplanmaz, JSON'a kaydedilince
+    sonraki açılışlarda layout tutarlı kalır.
+    """
+    if g.number_of_nodes() == 0:
+        return
+    simple = nx.Graph()
+    simple.add_nodes_from(g.nodes())
+    for u, v, _ in g.edges(data=True):
+        simple.add_edge(u, v)
+    k = 1.4 / max(1, simple.number_of_nodes() ** 0.5)
+    pos = nx.spring_layout(simple, seed=seed, k=k)
+    for n, (x, y) in pos.items():
+        g.nodes[n]["x"] = float(x)
+        g.nodes[n]["y"] = float(y)
 
 
 def save_graph(g: nx.MultiDiGraph, out_path: str | Path) -> Path:

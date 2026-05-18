@@ -583,8 +583,9 @@ with tab_tok:
 
 
 with top_ifc:
-    ifc_t1, ifc_t2, ifc_t3 = st.tabs(
-        ["Baseline IFC üret", "İhlal enjekte et", "IFC'leri görüntüle"]
+    ifc_t1, ifc_t1b, ifc_t2, ifc_t3 = st.tabs(
+        ["Baseline IFC üret", "Gerçek IFC içe aktar",
+         "İhlal enjekte et", "IFC'leri görüntüle"]
     )
 
     # -------- Baseline üretimi --------
@@ -593,7 +594,11 @@ with top_ifc:
         st.caption(
             "LLM tam IFC4 STEP metni üretir; ifcopenshell ile parse edilir. "
             "Parse başarısızsa 1 retry yapılır. Tüm boyutlar bilinçli olarak "
-            "cömert tutulur — bu dosyalarda ihlal olmamalı."
+            "cömert tutulur — bu dosyalarda ihlal olmamalı.\n\n"
+            "⚠️ Not: gpt-4o-mini ile tam IFC üretimi sınırlıdır; parse "
+            "başarılı görünse bile geometri/eleman seti çok yetersiz "
+            "(grafik 1 düğüm, 3D boş) olabilir. Daha iyi sonuç için "
+            "**'Gerçek IFC içe aktar'** sekmesinden gerçek bir IFC kullan."
         )
         c1, c2 = st.columns([2, 1])
         bn_prefix = c1.text_input("İsim öneki", value="House")
@@ -625,17 +630,91 @@ with top_ifc:
                 except Exception as e:
                     st.error(f"Hata: {e}")
 
+    # -------- Gerçek IFC içe aktar --------
+    with ifc_t1b:
+        st.subheader("Gerçek dünyadan IFC dosyası içe aktar")
+        st.caption(
+            "Yüklediğin .ifc dosyaları `ifc_models/imports/` altında saklanır, "
+            "ifcopenshell ile parse edilir, graph (NetworkX) hemen üretilir. "
+            "Sonrasında bunlara da ihlal enjekte edebilir, 3D/Graph "
+            "görselleştirmesini açabilirsin."
+        )
+        imp_uploads = st.file_uploader(
+            "IFC dosyaları (birden fazla seçilebilir)",
+            type=["ifc"], accept_multiple_files=True,
+            key="imp_uploads",
+        )
+        imp_dir_input = st.text_input(
+            "veya: yerel bir klasör yolu ver (tüm .ifc'leri tara)",
+            value="", placeholder="/Users/.../IFCs",
+        )
+        c_imp1, c_imp2 = st.columns(2)
+        if c_imp1.button("Yüklenenleri içe aktar",
+                         disabled=not imp_uploads):
+            rows = []
+            for uf in imp_uploads:
+                tmp = settings.ifc_dir / "imports" / f"_upload_{uf.name}"
+                tmp.write_bytes(uf.getbuffer())
+                try:
+                    r = ifc_gen.import_real_ifc(src_path=tmp, name=uf.name)
+                    rows.append({"name": uf.name, "id": r["ifc_model_id"][:8],
+                                 "status": r["status"], "graph": bool(r["graph_path"]),
+                                 "error": r["error"]})
+                finally:
+                    try: tmp.unlink()
+                    except Exception: pass
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        if c_imp2.button("Klasördekileri tara ve içe aktar",
+                         disabled=not imp_dir_input.strip()):
+            base = Path(imp_dir_input.strip()).expanduser()
+            if not base.exists():
+                st.error(f"Klasör bulunamadı: {base}")
+            else:
+                files = sorted(base.rglob("*.ifc"))
+                if not files:
+                    st.warning("Klasörde .ifc dosyası bulunamadı.")
+                else:
+                    rows = []
+                    with st.spinner(f"{len(files)} dosya içe aktarılıyor..."):
+                        for fp in files:
+                            try:
+                                r = ifc_gen.import_real_ifc(src_path=fp, name=fp.name)
+                                rows.append({
+                                    "name": fp.name, "id": r["ifc_model_id"][:8],
+                                    "status": r["status"], "graph": bool(r["graph_path"]),
+                                    "error": r["error"],
+                                })
+                            except Exception as e:
+                                rows.append({
+                                    "name": fp.name, "id": "-",
+                                    "status": "error", "graph": False,
+                                    "error": str(e),
+                                })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+        st.divider()
+        imported = storage.list_ifc_models("imported")
+        st.caption(f"İçe aktarılmış IFC: {len(imported)}")
+        if imported:
+            st.dataframe(pd.DataFrame([{
+                "id": m["id"][:8], "name": m["name"], "status": m["status"],
+                "graph": bool(m.get("graph_path")),
+                "created_at": m["created_at"], "file": m["file_path"],
+            } for m in imported]), use_container_width=True)
+
     # -------- Enjeksiyon --------
     with ifc_t2:
         st.subheader("Baseline'a havuzdan ihlal enjekte et")
 
-        baselines = [m for m in storage.list_ifc_models("baseline")
-                     if m["status"] == "ok"]
-        if not baselines:
-            st.warning("Önce geçerli (status=ok) baseline IFC üretmelisin.")
-        bo = {m["id"]: f"{m['name']} · {m['id'][:8]} · {m['created_at']}"
-              for m in baselines}
-        sel_base = st.selectbox("Baseline IFC", list(bo.keys()) or [""],
+        # Enjeksiyon kaynağı: baseline + imported (gerçek IFC) — ikisi de OK olmalı
+        sources = [m for m in storage.list_ifc_models()
+                   if m["kind"] in ("baseline", "imported") and m["status"] == "ok"]
+        if not sources:
+            st.warning("Önce geçerli (status=ok) bir baseline veya imported IFC olmalı.")
+        bo = {m["id"]: f"[{m['kind']}] {m['name']} · {m['id'][:8]} · {m['created_at']}"
+              for m in sources}
+        sel_base = st.selectbox("Kaynak IFC (baseline / imported)",
+                                list(bo.keys()) or [""],
                                 format_func=lambda k: bo.get(k, "-"))
 
         saved_pools = [r for r in storage.list_runs() if r["status"] == "saved"]
@@ -686,7 +765,8 @@ with top_ifc:
     # -------- Görüntüleme --------
     with ifc_t3:
         st.subheader("Üretilmiş IFC'ler")
-        kind = st.radio("Tür", ["baseline", "violated"], horizontal=True)
+        kind = st.radio("Tür", ["baseline", "violated", "imported"],
+                         horizontal=True)
         models = storage.list_ifc_models(kind)
         if not models:
             st.caption("Bu türde IFC henüz yok.")
@@ -782,19 +862,24 @@ with top_ifc:
 
                 with view_graph:
                     gpath = m.get("graph_path")
-                    if not gpath or not Path(gpath).exists():
+                    needs_build = not gpath or not Path(gpath).exists()
+                    if needs_build:
                         st.info("Bu IFC için graph kaydedilmemiş.")
-                        if st.button("Şimdi üret ve kaydet", key=f"gbuild_{sel}"):
-                            try:
-                                base_dir = Path(m["file_path"]).with_suffix("")
-                                gp = base_dir.with_suffix(".graph.json")
-                                ifc_graph.build_and_save(m["file_path"], gp)
-                                storage.set_ifc_graph_path(sel, str(gp))
-                                st.success(f"Graph üretildi: {gp}")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Graph üretme hatası: {e}")
-                    else:
+                    if st.button(
+                        ("Şimdi üret ve kaydet" if needs_build
+                         else "Graph'ı yeniden üret (layout dahil)"),
+                        key=f"gbuild_{sel}",
+                    ):
+                        try:
+                            base = Path(m["file_path"]).with_suffix("")
+                            gp = base.with_suffix(".graph.json")
+                            ifc_graph.build_and_save(m["file_path"], gp)
+                            storage.set_ifc_graph_path(sel, str(gp))
+                            st.success(f"Graph (yeniden) üretildi: {gp}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Graph üretme hatası: {e}")
+                    if not needs_build:
                         hl_graph = st.checkbox(
                             "Modifiye/eklenen düğümleri vurgula",
                             value=True, key=f"hlg_{sel}",
