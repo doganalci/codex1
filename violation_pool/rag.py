@@ -59,8 +59,14 @@ def _read_pdf(path: Path) -> list[tuple[int, str]]:
     return pages
 
 
-def _embed(texts: list[str]) -> list[list[float]]:
+def _embed(texts: list[str], usage_meta: dict | None = None) -> list[list[float]]:
+    from . import storage  # local import to avoid cycles at import time
     resp = _client().embeddings.create(model=settings.embedding_model, input=texts)
+    storage.record_usage_from_openai(
+        getattr(resp, "usage", None),
+        operation="embed", model=settings.embedding_model,
+        **(usage_meta or {}),
+    )
     return [d.embedding for d in resp.data]
 
 
@@ -105,7 +111,8 @@ def ingest_documents(collection_name: str, file_paths: list[Path], batch: int = 
             sub_ids = ids[s : s + batch]
             sub_docs = chunks[s : s + batch]
             sub_meta = metas[s : s + batch]
-            embs = _embed(sub_docs)
+            embs = _embed(sub_docs, usage_meta={"collection": collection_name,
+                                                "note": "ingest"})
             col.add(ids=sub_ids, documents=sub_docs, embeddings=embs, metadatas=sub_meta)
             added_chunks += len(sub_docs)
 
@@ -115,11 +122,15 @@ def ingest_documents(collection_name: str, file_paths: list[Path], batch: int = 
     return {"collection": collection_name, "documents": docs_added, "chunks_added": added_chunks}
 
 
-def retrieve(collection_name: str, query: str, k: int = 8) -> list[dict]:
+def retrieve(collection_name: str, query: str, k: int = 8,
+             usage_meta: dict | None = None) -> list[dict]:
     col = _chroma().get_or_create_collection(collection_name)
     if col.count() == 0:
         return []
-    emb = _embed([query])[0]
+    meta = {"collection": collection_name, "note": "retrieve"}
+    if usage_meta:
+        meta.update(usage_meta)
+    emb = _embed([query], usage_meta=meta)[0]
     res = col.query(query_embeddings=[emb], n_results=k)
     out: list[dict] = []
     for doc, meta in zip(res["documents"][0], res["metadatas"][0]):

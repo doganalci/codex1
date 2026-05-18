@@ -94,6 +94,19 @@ streamlit run app.py
   `ifc_models/violated/<id>.{ifc,labels.json,meta.json}`.
 - `data/` — yüklenen PDF/TXT kopyaları.
 
+## Token Kullanımı
+
+Tüm LLM ve embedding çağrıları SQLite'taki `llm_usage` tablosuna kaydedilir
+(operation, model, prompt/completion/total token, pool_run_id, ifc_model_id,
+collection, note, timestamp). Görüntülemek için:
+- **Sidebar**: toplam token + çağrı sayısı (her sayfa açılışında güncellenir).
+- **Havuzu Görüntüle**: seçili run için "Token (total)" metriği.
+- **IFC'leri görüntüle**: seçili IFC için "Token (bu IFC)" metriği.
+- **Token Kullanımı** alt sekmesi (havuz sekmesi altında): operasyon / pool_run_id /
+  ifc_model_id ile filtre + operation×model toplam tablosu + tüm kayıt listesi.
+- **Excel ihracı**: run_meta sayfasında `token_total`, `token_prompt`,
+  `token_completion`, `llm_calls` satırları.
+
 ## Notlar
 
 - LLM ve embedding modeli `.env`'den geliyor; UI'dan da değiştirilebilir.

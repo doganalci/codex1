@@ -93,7 +93,8 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group(0))
 
 
-def _propose_edit(violation: dict, cat: list[dict], model: str) -> dict:
+def _propose_edit(violation: dict, cat: list[dict], model: str,
+                  usage_meta: dict | None = None) -> dict:
     user = (
         "İhlal:\n"
         + json.dumps({k: violation.get(k) for k in ("title", "description",
@@ -110,6 +111,12 @@ def _propose_edit(violation: dict, cat: list[dict], model: str) -> dict:
         ],
         temperature=0.2,
         response_format={"type": "json_object"},
+    )
+    storage.record_usage_from_openai(
+        getattr(resp, "usage", None),
+        operation="ifc_inject", model=model,
+        note=(violation.get("title") or violation.get("id") or "")[:80],
+        **(usage_meta or {}),
     )
     return _parse_json(resp.choices[0].message.content or "")
 
@@ -161,12 +168,15 @@ def inject_violations(
     out_ifc = out_dir / f"{out_id}.ifc"
     out_lab = out_dir / f"{out_id}.labels.json"
     out_meta = out_dir / f"{out_id}.meta.json"
+    # Yeni violated IFC için inject çağrılarını da bu id'ye eşle
+    inject_meta_ifc_id = out_id
 
     labels: list[dict] = []
     applied = skipped = 0
+    inject_meta = {"pool_run_id": pool_run_id, "ifc_model_id": inject_meta_ifc_id}
     for v in violations:
         try:
-            sug = _propose_edit(v, cat, model)
+            sug = _propose_edit(v, cat, model, usage_meta=inject_meta)
         except Exception as e:
             labels.append({**_label_base(v), "status": "skipped",
                            "reason": f"LLM hata: {e}",
@@ -241,6 +251,7 @@ def inject_violations(
         graph_path = None
 
     mid = storage.create_ifc_model(
+        id=out_id,
         kind="violated", name=base["name"] + ".violated", parent_id=baseline_id,
         llm_model=model, prompt=None, pool_run_id=pool_run_id,
         params={"summary": summary, "selection_filter": selection_filter or {}},

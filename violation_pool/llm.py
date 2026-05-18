@@ -7,6 +7,7 @@ from typing import Iterable
 
 from openai import OpenAI
 
+from . import storage
 from .config import settings
 from .prompts import NAIVE_PROMPT, OPTIMIZED_PROMPT, build_user_message
 
@@ -62,6 +63,7 @@ def generate_naive(
     model: str | None = None,
     n: int = 20,
     avoid_titles: list[str] | None = None,
+    usage_meta: dict | None = None,
 ) -> list[dict]:
     """Method 1: send the user prompt as-is, with a thin JSON instruction."""
     msg = (
@@ -70,10 +72,15 @@ def generate_naive(
         + '\n\nLütfen sonucu yalnızca şu JSON formatında ver: '
           '{"violations":[{"description":"..."}]}'
     )
+    eff_model = model or settings.llm_model
     resp = _client().chat.completions.create(
-        model=model or settings.llm_model,
+        model=eff_model,
         messages=[{"role": "user", "content": msg}],
         temperature=0.4,
+    )
+    storage.record_usage_from_openai(
+        getattr(resp, "usage", None), operation="gen_naive",
+        model=eff_model, **(usage_meta or {}),
     )
     data = _extract_json(resp.choices[0].message.content or "")
     return _normalize(data.get("violations", []))
@@ -84,17 +91,24 @@ def generate_optimized(
     model: str | None = None,
     n: int = 20,
     avoid_titles: list[str] | None = None,
+    usage_meta: dict | None = None,
+    _operation: str = "gen_optimized",
 ) -> list[dict]:
     """Method 2: optimized system prompt + user prompt, no context."""
     user_msg = user_prompt.strip() + _count_suffix(n, avoid_titles)
+    eff_model = model or settings.llm_model
     resp = _client().chat.completions.create(
-        model=model or settings.llm_model,
+        model=eff_model,
         messages=[
             {"role": "system", "content": OPTIMIZED_PROMPT},
             {"role": "user", "content": user_msg},
         ],
         temperature=0.3,
         response_format={"type": "json_object"},
+    )
+    storage.record_usage_from_openai(
+        getattr(resp, "usage", None), operation=_operation,
+        model=eff_model, **(usage_meta or {}),
     )
     data = _extract_json(resp.choices[0].message.content or "")
     return _normalize(data.get("violations", []))
@@ -105,9 +119,13 @@ def generate_finetuned(
     ft_model_id: str,
     n: int = 20,
     avoid_titles: list[str] | None = None,
+    usage_meta: dict | None = None,
 ) -> list[dict]:
     """Method 4: same optimized prompt as method 2, but call a fine-tuned model."""
-    return generate_optimized(user_prompt, model=ft_model_id, n=n, avoid_titles=avoid_titles)
+    return generate_optimized(
+        user_prompt, model=ft_model_id, n=n, avoid_titles=avoid_titles,
+        usage_meta=usage_meta, _operation="gen_finetuned",
+    )
 
 
 def generate_rag(
@@ -116,17 +134,23 @@ def generate_rag(
     model: str | None = None,
     n: int = 20,
     avoid_titles: list[str] | None = None,
+    usage_meta: dict | None = None,
 ) -> list[dict]:
     """Method 3: same optimized prompt as method 2 + RAG context."""
     user_msg = build_user_message(user_prompt, context_chunks) + _count_suffix(n, avoid_titles)
+    eff_model = model or settings.llm_model
     resp = _client().chat.completions.create(
-        model=model or settings.llm_model,
+        model=eff_model,
         messages=[
             {"role": "system", "content": OPTIMIZED_PROMPT},
             {"role": "user", "content": user_msg},
         ],
         temperature=0.3,
         response_format={"type": "json_object"},
+    )
+    storage.record_usage_from_openai(
+        getattr(resp, "usage", None), operation="gen_rag",
+        model=eff_model, **(usage_meta or {}),
     )
     data = _extract_json(resp.choices[0].message.content or "")
     return _normalize(data.get("violations", []))

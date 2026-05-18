@@ -68,7 +68,8 @@ def _try_open(ifc_path: Path) -> tuple[bool, str | None]:
         return False, str(e)
 
 
-def _ask_llm(user_prompt: str, model: str, retry_error: str | None = None) -> str:
+def _ask_llm(user_prompt: str, model: str, retry_error: str | None = None,
+             note: str | None = None, ifc_model_id: str | None = None) -> str:
     msgs = [{"role": "system", "content": IFC_SYSTEM_PROMPT}]
     if retry_error:
         msgs.append({
@@ -84,6 +85,13 @@ def _ask_llm(user_prompt: str, model: str, retry_error: str | None = None) -> st
         messages=msgs,
         temperature=0.4,
         max_tokens=12000,
+    )
+    from . import storage
+    storage.record_usage_from_openai(
+        getattr(resp, "usage", None),
+        operation="ifc_gen", model=model,
+        ifc_model_id=ifc_model_id,
+        note=(note + (" [retry]" if retry_error else "")) if note else None,
     )
     return _strip_fences(resp.choices[0].message.content or "")
 
@@ -104,12 +112,13 @@ def generate_baseline(
     ifc_path = out_dir / f"{ifc_id}.ifc"
     meta_path = out_dir / f"{ifc_id}.meta.json"
 
-    text = _ask_llm(seed_prompt, model)
+    text = _ask_llm(seed_prompt, model, note=name, ifc_model_id=ifc_id)
     ifc_path.write_text(text, encoding="utf-8")
     ok, err = _try_open(ifc_path)
     if not ok:
         # one retry with parse error feedback
-        text2 = _ask_llm(seed_prompt, model, retry_error=err)
+        text2 = _ask_llm(seed_prompt, model, retry_error=err, note=name,
+                          ifc_model_id=ifc_id)
         ifc_path.write_text(text2, encoding="utf-8")
         ok, err = _try_open(ifc_path)
 
@@ -137,6 +146,7 @@ def generate_baseline(
             graph_path = None
 
     mid = storage.create_ifc_model(
+        id=ifc_id,
         kind="baseline", name=name, parent_id=None,
         llm_model=model, prompt=seed_prompt, pool_run_id=None,
         params=None, file_path=str(ifc_path), meta_path=str(meta_path),

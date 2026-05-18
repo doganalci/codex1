@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS ifc_models (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,        -- gen_naive|gen_optimized|gen_rag|gen_finetuned|embed|ifc_gen|ifc_inject|ft_prep
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    pool_run_id TEXT,
+    ifc_model_id TEXT,
+    collection TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ifc_violation_labels (
     id TEXT PRIMARY KEY,
     ifc_model_id TEXT NOT NULL,
@@ -287,8 +301,9 @@ def create_ifc_model(
     status: str,
     error: str | None = None,
     graph_path: str | None = None,
+    id: str | None = None,
 ) -> str:
-    mid = str(uuid.uuid4())
+    mid = id or str(uuid.uuid4())
     with _conn() as c:
         c.execute(
             """INSERT INTO ifc_models(id, kind, name, parent_id, llm_model, prompt,
@@ -367,3 +382,89 @@ def get_ifc_labels(ifc_model_id: str) -> list[dict]:
             (ifc_model_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------- LLM token kullanımı ----------
+def record_usage(
+    *,
+    operation: str,
+    model: str,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int | None = None,
+    pool_run_id: str | None = None,
+    ifc_model_id: str | None = None,
+    collection: str | None = None,
+    note: str | None = None,
+) -> None:
+    if total_tokens is None:
+        total_tokens = int(prompt_tokens) + int(completion_tokens)
+    with _conn() as c:
+        c.execute(
+            """INSERT INTO llm_usage(id, operation, model, prompt_tokens,
+               completion_tokens, total_tokens, pool_run_id, ifc_model_id,
+               collection, note, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                str(uuid.uuid4()), operation, model,
+                int(prompt_tokens or 0), int(completion_tokens or 0),
+                int(total_tokens or 0),
+                pool_run_id, ifc_model_id, collection, note, now(),
+            ),
+        )
+
+
+def record_usage_from_openai(usage_obj, *, operation: str, model: str,
+                             **refs) -> None:
+    """OpenAI response.usage objesinden veya dict'inden kaydeder."""
+    if usage_obj is None:
+        return
+    if hasattr(usage_obj, "prompt_tokens"):
+        pt = getattr(usage_obj, "prompt_tokens", 0) or 0
+        ct = getattr(usage_obj, "completion_tokens", 0) or 0
+        tt = getattr(usage_obj, "total_tokens", None)
+    else:
+        pt = usage_obj.get("prompt_tokens", 0) or 0
+        ct = usage_obj.get("completion_tokens", 0) or 0
+        tt = usage_obj.get("total_tokens")
+    record_usage(operation=operation, model=model,
+                 prompt_tokens=pt, completion_tokens=ct, total_tokens=tt,
+                 **refs)
+
+
+def list_usage(
+    *,
+    pool_run_id: str | None = None,
+    ifc_model_id: str | None = None,
+    collection: str | None = None,
+    operation: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    where, args = [], []
+    if pool_run_id:
+        where.append("pool_run_id=?"); args.append(pool_run_id)
+    if ifc_model_id:
+        where.append("ifc_model_id=?"); args.append(ifc_model_id)
+    if collection:
+        where.append("collection=?"); args.append(collection)
+    if operation:
+        where.append("operation=?"); args.append(operation)
+    q = "SELECT * FROM llm_usage"
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    q += " ORDER BY datetime(created_at) DESC"
+    if limit:
+        q += f" LIMIT {int(limit)}"
+    with _conn() as c:
+        rows = c.execute(q, tuple(args)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def usage_totals(**filters) -> dict:
+    rows = list_usage(**filters)
+    return {
+        "calls": len(rows),
+        "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
+        "completion_tokens": sum(r["completion_tokens"] for r in rows),
+        "total_tokens": sum(r["total_tokens"] for r in rows),
+    }

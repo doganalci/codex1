@@ -73,6 +73,15 @@ if not settings.openai_api_key:
     st.sidebar.warning("OPENAI_API_KEY tanımlı değil (.env).")
 
 st.sidebar.divider()
+st.sidebar.subheader("Token Kullanımı (toplam)")
+_tot = storage.usage_totals()
+st.sidebar.metric("Toplam token", f"{_tot['total_tokens']:,}",
+                  f"{_tot['calls']} çağrı")
+st.sidebar.caption(
+    f"prompt {_tot['prompt_tokens']:,}  ·  completion {_tot['completion_tokens']:,}"
+)
+
+st.sidebar.divider()
 st.sidebar.subheader("Geçmiş Havuzlar")
 runs = storage.list_runs()
 if runs:
@@ -105,8 +114,9 @@ st.title("İhlal Havuzu & IFC Stüdyosu")
 top_pool, top_ifc = st.tabs(["İhlal Havuzu Oluşturma", "İhlalli IFC Oluşturma"])
 
 with top_pool:
-    tab_run, tab_view, tab_rag, tab_ft = st.tabs(
-        ["Çalıştır", "Havuzu Görüntüle", "RAG / Doküman", "Fine-tune"]
+    tab_run, tab_view, tab_rag, tab_ft, tab_tok = st.tabs(
+        ["Çalıştır", "Havuzu Görüntüle", "RAG / Doküman", "Fine-tune",
+         "Token Kullanımı"]
     )
 
 # =========================================================
@@ -330,30 +340,32 @@ with tab_run:
                 for v in storage.get_violations(run_id)
             ]
 
+        umeta = {"pool_run_id": run_id}
         try:
             with st.spinner("LLM çalışıyor..."):
                 if method == METHOD_NAIVE:
                     items = llm.generate_naive(
                         prompt, model=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles,
+                        avoid_titles=avoid_titles, usage_meta=umeta,
                     )
                 elif method == METHOD_OPTIMIZED:
                     items = llm.generate_optimized(
                         prompt, model=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles,
+                        avoid_titles=avoid_titles, usage_meta=umeta,
                     )
                 elif method == METHOD_RAG:
-                    chunks = rag.retrieve(rag_collection, prompt, k=top_k)
+                    chunks = rag.retrieve(rag_collection, prompt, k=top_k,
+                                          usage_meta=umeta)
                     if not chunks:
                         st.warning("RAG koleksiyonu boş veya eşleşme yok.")
                     items = llm.generate_rag(
                         prompt, chunks, model=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles,
+                        avoid_titles=avoid_titles, usage_meta=umeta,
                     )
                 else:  # METHOD_FINETUNE
                     items = llm.generate_finetuned(
                         prompt, ft_model_id=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles,
+                        avoid_titles=avoid_titles, usage_meta=umeta,
                     )
         except Exception as e:
             st.error(f"Hata: {e}")
@@ -363,13 +375,19 @@ with tab_run:
         st.session_state["draft_run_id"] = run_id
         st.session_state["draft_method"] = method
         st.session_state["draft_is_append"] = bool(append_run)
+        tot = storage.usage_totals(pool_run_id=run_id)
+        tok_line = (
+            f"  ·  token: {tot['total_tokens']} "
+            f"(prompt {tot['prompt_tokens']} + completion {tot['completion_tokens']}, "
+            f"{tot['calls']} çağrı)"
+        )
         if append_run:
             st.success(
                 f"{added} ihlal **eklendi**. Toplam: "
-                f"{storage.count_violations(run_id)}. Aşağıdan onaylayıp Excel'i tazele."
+                f"{storage.count_violations(run_id)}.{tok_line}"
             )
         else:
-            st.success(f"{added} ihlal üretildi. Aşağıdan inceleyip kaydet/iptal et.")
+            st.success(f"{added} ihlal üretildi.{tok_line}")
 
     # Preview & confirm
     draft_id = st.session_state.get("draft_run_id")
@@ -432,11 +450,14 @@ with tab_view:
             f"yöntem: {METHOD_LABELS.get(run['method'], run['method'])} · "
             f"durum: {run['status']}"
         )
-        meta_cols = st.columns(4)
+        meta_cols = st.columns(5)
         meta_cols[0].metric("LLM", run["llm_model"])
         meta_cols[1].metric("Embedding", run.get("embedding_model") or "-")
         meta_cols[2].metric("Koleksiyon", run.get("rag_collection") or "-")
         meta_cols[3].metric("FT model", run.get("finetune_model_id") or "-")
+        run_tot = storage.usage_totals(pool_run_id=sel_id)
+        meta_cols[4].metric("Token (total)", f"{run_tot['total_tokens']:,}",
+                            f"{run_tot['calls']} çağrı")
         with st.expander("Kullanılan promt"):
             st.code(run["prompt"])
         vs = storage.get_violations(sel_id)
@@ -514,6 +535,53 @@ with tab_ft:
 # =========================================================
 # İhlalli IFC Oluşturma — üst seviye 2. sekme
 # =========================================================
+with tab_tok:
+    st.subheader("Token Kullanımı")
+    st.caption(
+        "Her LLM ve embedding çağrısı kaydedilir. Aşağıdan filtreleyebilir, "
+        "operasyon/model bazında toplamı görebilirsin."
+    )
+    fc1, fc2, fc3 = st.columns(3)
+    f_op = fc1.selectbox(
+        "Operasyon",
+        ["", "gen_naive", "gen_optimized", "gen_rag", "gen_finetuned",
+         "embed", "ifc_gen", "ifc_inject", "ft_prep"],
+    )
+    f_pool = fc2.text_input("Pool run id (opsiyonel)")
+    f_ifc = fc3.text_input("IFC model id (opsiyonel)")
+
+    rows = storage.list_usage(
+        operation=(f_op or None),
+        pool_run_id=(f_pool.strip() or None) if f_pool else None,
+        ifc_model_id=(f_ifc.strip() or None) if f_ifc else None,
+    )
+    if rows:
+        df_u = pd.DataFrame(rows)
+        # özet metrikleri
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Çağrı", len(df_u))
+        m2.metric("Toplam token", f"{int(df_u['total_tokens'].sum()):,}")
+        m3.metric("Prompt", f"{int(df_u['prompt_tokens'].sum()):,}")
+        m4.metric("Completion", f"{int(df_u['completion_tokens'].sum()):,}")
+
+        st.markdown("**Operasyon × Model toplamı**")
+        agg = df_u.groupby(["operation", "model"], dropna=False)[
+            ["prompt_tokens", "completion_tokens", "total_tokens"]
+        ].sum().reset_index()
+        agg["calls"] = (
+            df_u.groupby(["operation", "model"]).size().reset_index(name="calls")["calls"]
+        )
+        st.dataframe(agg, use_container_width=True)
+
+        st.markdown("**Kayıtlar (en yeni üstte)**")
+        show_cols = ["created_at", "operation", "model", "prompt_tokens",
+                     "completion_tokens", "total_tokens",
+                     "pool_run_id", "ifc_model_id", "collection", "note"]
+        st.dataframe(df_u[show_cols], use_container_width=True, height=380)
+    else:
+        st.info("Filtreyle eşleşen kayıt yok.")
+
+
 with top_ifc:
     ifc_t1, ifc_t2, ifc_t3 = st.tabs(
         ["Baseline IFC üret", "İhlal enjekte et", "IFC'leri görüntüle"]
@@ -604,9 +672,12 @@ with top_ifc:
                                           "n": int(inj_n),
                                           "seed": int(inj_seed)},
                     )
+                inj_tot = storage.usage_totals(ifc_model_id=out["ifc_model_id"])
                 st.success(
                     f"Bitti. Uygulanan: {out['summary']['applied']}, "
-                    f"atlanan: {out['summary']['skipped']}.\n"
+                    f"atlanan: {out['summary']['skipped']}. "
+                    f"Token: {inj_tot['total_tokens']:,} "
+                    f"({inj_tot['calls']} çağrı)\n"
                     f"IFC: {out['ifc_path']}\nLabels: {out['labels_path']}"
                 )
             except Exception as e:
@@ -636,6 +707,13 @@ with top_ifc:
             sel = st.selectbox("Detay", list(opt.keys()),
                                format_func=lambda k: opt[k])
             m = storage.get_ifc_model(sel)
+            ifc_tot = storage.usage_totals(ifc_model_id=sel)
+            mcols = st.columns(4)
+            mcols[0].metric("LLM", m["llm_model"])
+            mcols[1].metric("Status", m["status"])
+            mcols[2].metric("Token (bu IFC)", f"{ifc_tot['total_tokens']:,}",
+                            f"{ifc_tot['calls']} çağrı")
+            mcols[3].metric("Created", m["created_at"])
             cols = st.columns(3)
             with open(m["file_path"], "rb") as f:
                 cols[0].download_button("IFC indir", f,

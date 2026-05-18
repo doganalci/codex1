@@ -47,6 +47,7 @@ def export_run(run_id: str) -> Path:
                 }
             )
 
+    tot = storage.usage_totals(pool_run_id=run["id"])
     meta_rows = [
         {"key": "run_id", "value": run["id"]},
         {"key": "name", "value": run["name"]},
@@ -60,6 +61,10 @@ def export_run(run_id: str) -> Path:
         {"key": "created_at", "value": run["created_at"]},
         {"key": "updated_at", "value": run["updated_at"]},
         {"key": "prompt", "value": run["prompt"]},
+        {"key": "token_total", "value": tot["total_tokens"]},
+        {"key": "token_prompt", "value": tot["prompt_tokens"]},
+        {"key": "token_completion", "value": tot["completion_tokens"]},
+        {"key": "llm_calls", "value": tot["calls"]},
     ]
 
     out = settings.export_dir / f"violations_{run['name']}_{run['id'][:8]}.xlsx"

@@ -74,6 +74,12 @@ def build_training_jsonl(
                         response_format={"type": "json_object"},
                     )
                     assistant = resp.choices[0].message.content or ""
+                    from . import storage
+                    storage.record_usage_from_openai(
+                        getattr(resp, "usage", None),
+                        operation="ft_prep", model=model,
+                        collection=collection_name, note=f"chunk {doc}:p{page}",
+                    )
                 except Exception:
                     continue
                 rec = {
