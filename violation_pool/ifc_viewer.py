@@ -39,7 +39,10 @@ def ifc_to_figure(
             f"Detay: {e}"
         )
 
-    f = ifcopenshell.open(str(ifc_path))
+    try:
+        f = ifcopenshell.open(str(ifc_path))
+    except Exception as e:
+        raise ValueError(f"IFC açılamadı: {e}")
     s = geom.settings()
     try:
         s.set(s.USE_WORLD_COORDS, True)
@@ -86,7 +89,12 @@ def ifc_to_figure(
         count += 1
 
     if not meshes:
-        raise ValueError("Çizilebilecek geometri bulunamadı.")
+        raise ValueError(
+            "Çizilebilecek geometri bulunamadı. "
+            "IFC'de IfcExtrudedAreaSolid / IfcShapeRepresentation içeren eleman yok "
+            "(LLM 'raw' modunda sık görülür). 'Gerçek IFC içe aktar' veya "
+            "parametrik baseline kullan."
+        )
 
     fig = go.Figure(data=meshes)
     fig.update_layout(

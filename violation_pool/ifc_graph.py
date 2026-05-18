@@ -73,64 +73,94 @@ def build_graph(ifc_path: str | Path) -> nx.MultiDiGraph:
         except Exception:
             elems = []
         for el in elems:
-            gid = getattr(el, "GlobalId", None)
+            try:
+                gid = getattr(el, "GlobalId", None)
+            except Exception:
+                continue
             if not gid or gid in accepted:
                 continue
-            g.add_node(
-                gid,
-                ifc_type=el.is_a(),
-                attributes=_attrs_dict(el),
-                psets=_psets(el),
-            )
-            accepted.add(gid)
+            try:
+                g.add_node(
+                    gid,
+                    ifc_type=el.is_a(),
+                    attributes=_attrs_dict(el),
+                    psets=_psets(el),
+                )
+                accepted.add(gid)
+            except Exception:
+                continue
 
     def _edge(u, v, **kw):
         if u in g.nodes and v in g.nodes:
             g.add_edge(u, v, **kw)
 
+    def _safe_by_type(name):
+        try:
+            return f.by_type(name)
+        except Exception:
+            return []
+
     # Aggregation
-    for rel in f.by_type("IfcRelAggregates"):
-        parent = getattr(rel, "RelatingObject", None)
-        if not parent:
+    for rel in _safe_by_type("IfcRelAggregates"):
+        try:
+            parent = getattr(rel, "RelatingObject", None)
+            if not parent:
+                continue
+            for child in getattr(rel, "RelatedObjects", []) or []:
+                _edge(parent.GlobalId, child.GlobalId, rel="aggregates")
+        except Exception:
             continue
-        for child in getattr(rel, "RelatedObjects", []) or []:
-            _edge(parent.GlobalId, child.GlobalId, rel="aggregates")
 
     # Containment in spatial structure
-    for rel in f.by_type("IfcRelContainedInSpatialStructure"):
-        parent = getattr(rel, "RelatingStructure", None)
-        if not parent:
+    for rel in _safe_by_type("IfcRelContainedInSpatialStructure"):
+        try:
+            parent = getattr(rel, "RelatingStructure", None)
+            if not parent:
+                continue
+            for child in getattr(rel, "RelatedElements", []) or []:
+                _edge(parent.GlobalId, child.GlobalId, rel="contains")
+        except Exception:
             continue
-        for child in getattr(rel, "RelatedElements", []) or []:
-            _edge(parent.GlobalId, child.GlobalId, rel="contains")
 
     # Space boundaries — wall bounds space
     space_to_elems: dict[str, list[str]] = {}
-    for rel in f.by_type("IfcRelSpaceBoundary"):
-        sp = getattr(rel, "RelatingSpace", None)
-        el = getattr(rel, "RelatedBuildingElement", None)
-        if sp and el:
-            _edge(el.GlobalId, sp.GlobalId, rel="bounds")
-            space_to_elems.setdefault(sp.GlobalId, []).append(el.GlobalId)
+    for rel in _safe_by_type("IfcRelSpaceBoundary"):
+        try:
+            sp = getattr(rel, "RelatingSpace", None)
+            el = getattr(rel, "RelatedBuildingElement", None)
+            if sp and el:
+                _edge(el.GlobalId, sp.GlobalId, rel="bounds")
+                space_to_elems.setdefault(sp.GlobalId, []).append(el.GlobalId)
+        except Exception:
+            continue
 
     # Voids / Fills
-    for rel in f.by_type("IfcRelVoidsElement"):
-        host = getattr(rel, "RelatingBuildingElement", None)
-        op = getattr(rel, "RelatedOpeningElement", None)
-        if host and op:
-            _edge(host.GlobalId, op.GlobalId, rel="voids")
-    for rel in f.by_type("IfcRelFillsElement"):
-        host = getattr(rel, "RelatedBuildingElement", None)
-        op = getattr(rel, "RelatingOpeningElement", None)
-        if host and op:
-            _edge(host.GlobalId, op.GlobalId, rel="fills")
+    for rel in _safe_by_type("IfcRelVoidsElement"):
+        try:
+            host = getattr(rel, "RelatingBuildingElement", None)
+            op = getattr(rel, "RelatedOpeningElement", None)
+            if host and op:
+                _edge(host.GlobalId, op.GlobalId, rel="voids")
+        except Exception:
+            continue
+    for rel in _safe_by_type("IfcRelFillsElement"):
+        try:
+            host = getattr(rel, "RelatedBuildingElement", None)
+            op = getattr(rel, "RelatingOpeningElement", None)
+            if host and op:
+                _edge(host.GlobalId, op.GlobalId, rel="fills")
+        except Exception:
+            continue
 
     # Path element connections
-    for rel in f.by_type("IfcRelConnectsPathElements"):
-        a = getattr(rel, "RelatingElement", None)
-        b = getattr(rel, "RelatedElement", None)
-        if a and b:
-            _edge(a.GlobalId, b.GlobalId, rel="connects")
+    for rel in _safe_by_type("IfcRelConnectsPathElements"):
+        try:
+            a = getattr(rel, "RelatingElement", None)
+            b = getattr(rel, "RelatedElement", None)
+            if a and b:
+                _edge(a.GlobalId, b.GlobalId, rel="connects")
+        except Exception:
+            continue
 
     # Derived: co-bounds-space (aynı Space'i sınırlayan elemanlar)
     for sp_id, elems in space_to_elems.items():

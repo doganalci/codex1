@@ -591,14 +591,21 @@ with top_ifc:
     # -------- Baseline üretimi --------
     with ifc_t1:
         st.subheader("İhlalsiz baseline IFC üret")
+        mode = st.radio(
+            "Üretim modu",
+            ["parametric", "raw"],
+            format_func=lambda m: (
+                "Parametrik (önerilen): LLM JSON spec verir, IFC'yi biz kurarız"
+                if m == "parametric"
+                else "Raw: LLM doğrudan IFC4 STEP yazar (deneysel; çoğunlukla boş)"
+            ),
+            horizontal=False,
+        )
         st.caption(
-            "LLM tam IFC4 STEP metni üretir; ifcopenshell ile parse edilir. "
-            "Parse başarısızsa 1 retry yapılır. Tüm boyutlar bilinçli olarak "
-            "cömert tutulur — bu dosyalarda ihlal olmamalı.\n\n"
-            "⚠️ Not: gpt-4o-mini ile tam IFC üretimi sınırlıdır; parse "
-            "başarılı görünse bile geometri/eleman seti çok yetersiz "
-            "(grafik 1 düğüm, 3D boş) olabilir. Daha iyi sonuç için "
-            "**'Gerçek IFC içe aktar'** sekmesinden gerçek bir IFC kullan."
+            "Parametrik modda LLM sadece oda boyutları / kapı-pencere konumları "
+            "için JSON döndürür; valid IFC4 geometrisi (duvar/slab/kapı/pencere "
+            "extrüzyonları, placement zinciri) ifcopenshell ile inşa edilir. "
+            "Bu sayede 3D görselleştirme ve graph zenginleşir."
         )
         c1, c2 = st.columns([2, 1])
         bn_prefix = c1.text_input("İsim öneki", value="House")
@@ -607,22 +614,26 @@ with top_ifc:
         bn_prompt = st.text_area(
             "Promt (baseline)",
             value=(
-                "Tek aileli, küçük bir konutun tam IFC4 dosyasını üret. "
-                "Tüm boyutlar mevzuata fazlasıyla uygun (ihlalsiz) olsun. "
-                "Sadece geçerli SPF metni döndür."
+                "Küçük, tek aileli bir konut için 3-6 odalı, en az 1 kapı ve "
+                "2 pencereli mevzuata fazlasıyla uygun bir spec üret."
+                if mode == "parametric"
+                else "Tek aileli, küçük bir konutun tam IFC4 dosyasını üret. "
+                "Tüm boyutlar mevzuata fazlasıyla uygun (ihlalsiz) olsun."
             ),
             height=120,
         )
         if st.button("Baseline IFC'leri üret", type="primary"):
-            with st.spinner(f"{bn_count} adet baseline üretiliyor (LLM)..."):
+            with st.spinner(f"{bn_count} adet baseline üretiliyor..."):
                 try:
                     res = ifc_gen.generate_baselines(
                         n=int(bn_count), seed_prompt=bn_prompt,
                         model=bn_model.strip() or None, name_prefix=bn_prefix,
+                        mode=mode,
                     )
                     df = pd.DataFrame([{
                         "id": r["ifc_model_id"][:8],
                         "status": r["status"],
+                        "mode": r.get("mode", "-"),
                         "ifc": r["ifc_path"],
                         "error": r["error"],
                     } for r in res])
