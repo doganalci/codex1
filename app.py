@@ -343,30 +343,22 @@ with tab_run:
         umeta = {"pool_run_id": run_id}
         try:
             with st.spinner("LLM çalışıyor..."):
-                if method == METHOD_NAIVE:
-                    items = llm.generate_naive(
-                        prompt, model=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles, usage_meta=umeta,
-                    )
-                elif method == METHOD_OPTIMIZED:
-                    items = llm.generate_optimized(
-                        prompt, model=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles, usage_meta=umeta,
-                    )
-                elif method == METHOD_RAG:
-                    chunks = rag.retrieve(rag_collection, prompt, k=top_k,
-                                          usage_meta=umeta)
-                    if not chunks:
+                rag_chunks = None
+                if method == METHOD_RAG:
+                    rag_chunks = rag.retrieve(rag_collection, prompt, k=top_k,
+                                              usage_meta=umeta)
+                    if not rag_chunks:
                         st.warning("RAG koleksiyonu boş veya eşleşme yok.")
-                    items = llm.generate_rag(
-                        prompt, chunks, model=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles, usage_meta=umeta,
-                    )
-                else:  # METHOD_FINETUNE
-                    items = llm.generate_finetuned(
-                        prompt, ft_model_id=effective_llm, n=int(n_violations),
-                        avoid_titles=avoid_titles, usage_meta=umeta,
-                    )
+                items = llm.generate_chunked(
+                    method=method,
+                    user_prompt=prompt,
+                    model=(effective_llm if method != METHOD_FINETUNE else None),
+                    n=int(n_violations),
+                    avoid_titles=avoid_titles,
+                    usage_meta=umeta,
+                    context_chunks=rag_chunks,
+                    ft_model_id=(effective_llm if method == METHOD_FINETUNE else None),
+                )
         except Exception as e:
             st.error(f"Hata: {e}")
             st.stop()

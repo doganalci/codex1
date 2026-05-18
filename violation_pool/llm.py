@@ -28,6 +28,49 @@ def _extract_json(text: str) -> dict:
     raise ValueError("LLM cevabında JSON bulunamadı")
 
 
+def _extract_json_robust(text: str) -> dict:
+    """LLM cevabı `max_tokens` ile kesilirse, son tamamlanan obje'ye kadar
+    olan kısmı kurtarmaya çalışır."""
+    try:
+        return _extract_json(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # `"violations": [` arrayini bul, son komplet `}` 'ye kadar al, kapatıp parse et
+    m = re.search(r'"violations"\s*:\s*\[', text)
+    if not m:
+        raise ValueError("Kesik JSON: 'violations' bulunamadı")
+    start = m.end()
+    depth = 0
+    in_string = False
+    escape = False
+    last_complete_end = -1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                last_complete_end = i + 1
+        elif ch == "]" and depth == 0:
+            break
+    if last_complete_end < 0:
+        raise ValueError("Kesik JSON: tamamlanmış violation objesi yok")
+    repaired = text[:last_complete_end] + "]}"
+    return json.loads(repaired)
+
+
 def _normalize(items: list[dict]) -> list[dict]:
     out: list[dict] = []
     for it in items or []:
@@ -77,12 +120,13 @@ def generate_naive(
         model=eff_model,
         messages=[{"role": "user", "content": msg}],
         temperature=0.4,
+        max_tokens=16000,
     )
     storage.record_usage_from_openai(
         getattr(resp, "usage", None), operation="gen_naive",
         model=eff_model, **(usage_meta or {}),
     )
-    data = _extract_json(resp.choices[0].message.content or "")
+    data = _extract_json_robust(resp.choices[0].message.content or "")
     return _normalize(data.get("violations", []))
 
 
@@ -105,12 +149,13 @@ def generate_optimized(
         ],
         temperature=0.3,
         response_format={"type": "json_object"},
+        max_tokens=16000,
     )
     storage.record_usage_from_openai(
         getattr(resp, "usage", None), operation=_operation,
         model=eff_model, **(usage_meta or {}),
     )
-    data = _extract_json(resp.choices[0].message.content or "")
+    data = _extract_json_robust(resp.choices[0].message.content or "")
     return _normalize(data.get("violations", []))
 
 
@@ -147,13 +192,67 @@ def generate_rag(
         ],
         temperature=0.3,
         response_format={"type": "json_object"},
+        max_tokens=16000,
     )
     storage.record_usage_from_openai(
         getattr(resp, "usage", None), operation="gen_rag",
         model=eff_model, **(usage_meta or {}),
     )
-    data = _extract_json(resp.choices[0].message.content or "")
+    data = _extract_json_robust(resp.choices[0].message.content or "")
     return _normalize(data.get("violations", []))
+
+
+CHUNK_SIZE = 30
+
+
+def generate_chunked(
+    method: str,
+    user_prompt: str,
+    *,
+    model: str | None = None,
+    n: int = 20,
+    avoid_titles: list[str] | None = None,
+    usage_meta: dict | None = None,
+    context_chunks: list[dict] | None = None,
+    ft_model_id: str | None = None,
+    chunk_size: int = CHUNK_SIZE,
+) -> list[dict]:
+    """N büyükse birden çok çağrıda üretir. Aralarda mevcut başlıkları
+    avoid_titles olarak ekler, mükerrer cevabı azaltır."""
+    from .config import METHOD_NAIVE, METHOD_OPTIMIZED, METHOD_RAG, METHOD_FINETUNE
+
+    accumulated: list[dict] = []
+    avoid = list(avoid_titles or [])
+    remaining = int(n)
+    while remaining > 0:
+        batch = min(chunk_size, remaining)
+        if method == METHOD_NAIVE:
+            items = generate_naive(user_prompt, model=model, n=batch,
+                                   avoid_titles=avoid, usage_meta=usage_meta)
+        elif method == METHOD_OPTIMIZED:
+            items = generate_optimized(user_prompt, model=model, n=batch,
+                                        avoid_titles=avoid, usage_meta=usage_meta)
+        elif method == METHOD_RAG:
+            items = generate_rag(user_prompt, context_chunks or [], model=model,
+                                  n=batch, avoid_titles=avoid, usage_meta=usage_meta)
+        elif method == METHOD_FINETUNE:
+            if not ft_model_id:
+                raise ValueError("ft_model_id gerekli")
+            items = generate_finetuned(user_prompt, ft_model_id=ft_model_id,
+                                        n=batch, avoid_titles=avoid,
+                                        usage_meta=usage_meta)
+        else:
+            raise ValueError(f"Bilinmeyen yöntem: {method}")
+        if not items:
+            break  # boş cevap → erken çık (sonsuz döngüye girme)
+        accumulated.extend(items)
+        # Bu turda gelenleri sonraki turlarda yasakla
+        for it in items:
+            t = (it.get("title") or it.get("description") or "").strip()
+            if t and t not in avoid:
+                avoid.append(t)
+        remaining -= batch
+    return accumulated
 
 
 def default_prompt_for(method: str) -> str:
