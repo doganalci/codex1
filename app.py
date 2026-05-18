@@ -808,6 +808,10 @@ with top_ifc:
                                           key="inj_decoy_seed")
             inj_model = dc3.text_input("Enjeksiyon LLM modeli",
                                        value=settings.ifc_llm_model)
+            fill_from_pool = st.checkbox(
+                "Bir ihlal IFC'ye uymazsa havuzdan başka birini dene "
+                "(önerilen)", value=True, key="inj_fill",
+            )
 
             ne_real = len(selected_ids)
             ne_decoys = int(round(ne_real * decoy_ratio))
@@ -830,15 +834,23 @@ with top_ifc:
                                 "severity": sev_filter or None,
                                 "selected_ids": selected_ids,
                                 "decoy_ratio": decoy_ratio,
+                                "fill_from_pool": fill_from_pool,
                             },
                             decoy_ratio=decoy_ratio,
                             decoy_seed=int(decoy_seed),
+                            fill_from_pool=fill_from_pool,
                         )
                     inj_tot = storage.usage_totals(ifc_model_id=out["ifc_model_id"])
                     s = out["summary"]
+                    repl = s.get("replaced_from_pool", 0)
+                    repl_txt = (
+                        f"; yedek havuzdan: **{repl}**" if repl else ""
+                    )
                     st.success(
-                        f"Bitti. Uygulanan: {s['applied']}, "
-                        f"atlanan: {s['skipped']}, decoy: {s['decoys']}. "
+                        f"Bitti. İstenen: {s['requested']}, "
+                        f"uygulanan: **{s['applied']}**, "
+                        f"atlanan: {s['skipped']}{repl_txt}, "
+                        f"decoy: {s['decoys']}. "
                         f"Token: {inj_tot['total_tokens']:,} "
                         f"({inj_tot['calls']} çağrı)\n"
                         f"IFC: {out['ifc_path']}\nLabels: {out['labels_path']}"

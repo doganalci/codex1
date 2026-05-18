@@ -333,12 +333,16 @@ def inject_violations(
     selection_filter: dict | None = None,
     decoy_ratio: float = 0.20,
     decoy_seed: int | None = None,
+    fill_from_pool: bool = True,
+    max_replacement_attempts: int | None = None,
 ) -> dict:
-    """violations: havuzdan seçilmiş ihlal dict'leri (storage.get_violations
-    çıktısı formatı).
-    decoy_ratio: gerçek ihlal sayısının yüzdesi kadar SAHTE (decoy) etiket
-        eklenir. IFC modifiye edilmez; etiket "ihlal değil" olarak işaretlenir.
-        Test amaçlı (downstream sistem decoy'u gerçek ihlalden ayırabiliyor mu?).
+    """violations: havuzdan seçilmiş ihlal dict'leri.
+    decoy_ratio: GERÇEKTEN uygulanan ihlal sayısının yüzdesi kadar SAHTE
+        (decoy) etiket eklenir. IFC modifiye edilmez.
+    fill_from_pool: bir ihlal IFC'ye uymazsa (applicable=false / hata)
+        aynı havuzdan başka bir ihlal otomatik denenir; hedef sayıya
+        ulaşana veya havuz tükenene kadar.
+    max_replacement_attempts: yedek deneme üst sınırı (None → 5×hedef+10).
     """
     import ifcopenshell  # local import
     import random
@@ -359,15 +363,51 @@ def inject_violations(
     out_meta = out_dir / f"{out_id}.meta.json"
     inject_meta_ifc_id = out_id
 
+    target = len(violations)
+
+    # Yedek havuz: aynı pool_run_id'de seçilmeyen ihlaller
+    fallback: list[dict] = []
+    if fill_from_pool and pool_run_id:
+        try:
+            all_pool = storage.get_violations(pool_run_id)
+        except Exception:
+            all_pool = []
+        primary_ids = {v.get("id") for v in violations if v.get("id")}
+        fallback = [v for v in all_pool
+                    if v.get("id") and v["id"] not in primary_ids]
+        rng_q = random.Random(decoy_seed)
+        rng_q.shuffle(fallback)
+
+    queue = list(violations) + fallback
+    max_attempts = max_replacement_attempts or (target * 5 + 10)
+    primary_n = len(violations)
+
     labels: list[dict] = []
-    applied = skipped = 0
+    applied = skipped = replaced = 0
+    seen_ids: set[str] = set()
     inject_meta = {"pool_run_id": pool_run_id, "ifc_model_id": inject_meta_ifc_id}
-    for v in violations:
+
+    attempts = 0
+    for idx, v in enumerate(queue):
+        if applied >= target:
+            break
+        if attempts >= max_attempts:
+            break
+        vid = v.get("id")
+        if vid and vid in seen_ids:
+            continue
+        if vid:
+            seen_ids.add(vid)
+        attempts += 1
+        is_replacement = idx >= primary_n
+
         try:
             sug = _propose_edit(v, cat, model, usage_meta=inject_meta)
         except Exception as e:
             labels.append({**_label_base(v), "status": "skipped",
                            "reason": f"LLM hata: {e}", "is_decoy": False,
+                           "action": "modify_attribute",
+                           "is_replacement": is_replacement,
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
@@ -377,6 +417,7 @@ def inject_violations(
                            "reason": sug.get("reason") or "uygulanabilir hedef yok",
                            "is_decoy": False,
                            "action": sug.get("action") or "modify_attribute",
+                           "is_replacement": is_replacement,
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
@@ -390,11 +431,11 @@ def inject_violations(
                 # default: modify_attribute
                 before, after = _apply_edit(src, sug["target_guid"],
                                              sug["attribute"], sug["new_value"])
-                target = src.by_guid(sug["target_guid"])
+                target_el = src.by_guid(sug["target_guid"])
                 lbl_extra = {
                     "ifc_global_id": sug["target_guid"],
-                    "ifc_type": sug.get("ifc_type") or target.is_a(),
-                    "ifc_name": getattr(target, "Name", None),
+                    "ifc_type": sug.get("ifc_type") or target_el.is_a(),
+                    "ifc_name": getattr(target_el, "Name", None),
                     "attribute": sug["attribute"],
                     "value_before": before,
                     "value_after": after,
@@ -403,6 +444,7 @@ def inject_violations(
             labels.append({**_label_base(v), "status": "skipped",
                            "reason": f"uygulama hatası: {e}",
                            "is_decoy": False, "action": action,
+                           "is_replacement": is_replacement,
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
@@ -413,17 +455,20 @@ def inject_violations(
             "status": "applied",
             "is_decoy": False,
             "action": action,
+            "is_replacement": is_replacement,
             "reason": sug.get("rationale"),
             "applied_at": datetime.utcnow().isoformat(timespec="seconds"),
         })
         applied += 1
+        if is_replacement:
+            replaced += 1
 
-    # ----- Decoys (sahte ihlaller) -----
+    # ----- Decoys (sahte ihlaller) — gerçek uygulanan sayısının yüzdesi -----
     decoys_added = 0
     decoy_ratio = max(0.0, float(decoy_ratio or 0.0))
-    n_decoys_target = int(round(len(violations) * decoy_ratio))
+    n_decoys_target = int(round(applied * decoy_ratio))
     if n_decoys_target > 0 and cat:
-        rng = random.Random(decoy_seed)
+        rng = random.Random((decoy_seed or 0) + 999)
         used = {l.get("ifc_global_id") for l in labels
                 if l.get("status") == "applied" and l.get("ifc_global_id")}
         cand = [c for c in cat if c.get("guid") and c["guid"] not in used
@@ -449,6 +494,7 @@ def inject_violations(
                 "status": "decoy",
                 "is_decoy": True,
                 "action": "decoy",
+                "is_replacement": False,
                 "reason": "Sahte (honeypot) etiket — gerçek ihlal değil; "
                           "test için yerleştirildi.",
                 "applied_at": datetime.utcnow().isoformat(timespec="seconds"),
@@ -457,9 +503,14 @@ def inject_violations(
 
     src.write(str(out_ifc))
 
-    summary = {"requested": len(violations), "applied": applied,
-               "skipped": skipped, "decoys": decoys_added,
-               "decoy_ratio": decoy_ratio}
+    summary = {
+        "requested": target,
+        "applied": applied,
+        "skipped": skipped,
+        "replaced_from_pool": replaced,
+        "decoys": decoys_added,
+        "decoy_ratio": decoy_ratio,
+    }
     labels_doc = {
         "ifc_file": out_ifc.name,
         "baseline_id": baseline_id,
@@ -467,6 +518,7 @@ def inject_violations(
         "pool_run_id": pool_run_id,
         "llm_model": model,
         "selection_filter": selection_filter or {},
+        "fill_from_pool": fill_from_pool,
         "created_at": datetime.utcnow().isoformat(timespec="seconds"),
         "summary": summary,
         "labels": labels,
