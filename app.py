@@ -1265,25 +1265,66 @@ with top_ifc:
                         "Modifiye/eklenen elemanları kırmızı vurgula",
                         value=True, key=f"hl_{sel}", disabled=(kind != "violated"),
                     )
+                    parent_id = m.get("parent_id") if kind == "violated" else None
+                    compare3d = False
+                    if parent_id:
+                        compare3d = st.checkbox(
+                            "Baseline ile yan yana karşılaştır",
+                            value=False, key=f"cmp3d_{sel}",
+                        )
                     if st.button("3D çiz", key=f"draw3d_{sel}"):
                         try:
-                            with st.spinner("Geometri tessellate ediliyor..."):
-                                fig, stats = ifc_viewer.ifc_to_figure(
-                                    m["file_path"],
-                                    highlight_guids=hl_guids if highlight else set(),
-                                    decoy_guids=dc_guids if highlight else set(),
-                                    max_elements=int(max_el),
+                            if compare3d and parent_id:
+                                base = storage.get_ifc_model(parent_id)
+                                cb, cv = st.columns(2)
+                                with cb:
+                                    st.markdown(f"**Baseline**: `{base['name']}`")
+                                    with st.spinner("Baseline tessellate..."):
+                                        fb, sb = ifc_viewer.ifc_to_figure(
+                                            base["file_path"],
+                                            max_elements=int(max_el),
+                                        )
+                                    st.caption(f"Eleman: {sb['drawn']} (vurgu yok)")
+                                    st.plotly_chart(
+                                        fb, use_container_width=True,
+                                        config={"scrollZoom": True},
+                                    )
+                                with cv:
+                                    st.markdown(f"**İhlalli**: `{m['name']}`")
+                                    with st.spinner("İhlalli tessellate..."):
+                                        fv, sv = ifc_viewer.ifc_to_figure(
+                                            m["file_path"],
+                                            highlight_guids=hl_guids if highlight else set(),
+                                            decoy_guids=dc_guids if highlight else set(),
+                                            max_elements=int(max_el),
+                                        )
+                                    st.caption(
+                                        f"Eleman: {sv['drawn']} · "
+                                        f"ihlal: {len(hl_guids)} · "
+                                        f"decoy: {len(dc_guids)}"
+                                    )
+                                    st.plotly_chart(
+                                        fv, use_container_width=True,
+                                        config={"scrollZoom": True},
+                                    )
+                            else:
+                                with st.spinner("Geometri tessellate ediliyor..."):
+                                    fig, stats = ifc_viewer.ifc_to_figure(
+                                        m["file_path"],
+                                        highlight_guids=hl_guids if highlight else set(),
+                                        decoy_guids=dc_guids if highlight else set(),
+                                        max_elements=int(max_el),
+                                    )
+                                st.caption(
+                                    f"Çizilen eleman: {stats['drawn']}  ·  atlanan: {stats['skipped']}"
+                                    + (f"  ·  ihlal: {len(hl_guids)}"
+                                       f"  ·  decoy: {len(dc_guids)}"
+                                       if (hl_guids or dc_guids) and highlight else "")
                                 )
-                            st.caption(
-                                f"Çizilen eleman: {stats['drawn']}  ·  atlanan: {stats['skipped']}"
-                                + (f"  ·  ihlal: {len(hl_guids)}"
-                                   f"  ·  decoy: {len(dc_guids)}"
-                                   if (hl_guids or dc_guids) and highlight else "")
-                            )
-                            st.plotly_chart(
-                                fig, use_container_width=True,
-                                config={"scrollZoom": True},
-                            )
+                                st.plotly_chart(
+                                    fig, use_container_width=True,
+                                    config={"scrollZoom": True},
+                                )
                         except Exception as e:
                             st.error(f"3D görselleştirme hatası: {e}")
 
@@ -1312,32 +1353,82 @@ with top_ifc:
                             value=True, key=f"hlg_{sel}",
                             disabled=(kind != "violated"),
                         )
+                        compare_g = False
+                        if kind == "violated" and m.get("parent_id"):
+                            compare_g = st.checkbox(
+                                "Baseline grafını yan yana göster",
+                                value=False, key=f"cmpg_{sel}",
+                            )
                         if st.button("Graph çiz", key=f"drawg_{sel}"):
                             try:
-                                with st.spinner("Graph çiziliyor..."):
-                                    g = ifc_graph.load_graph(gpath)
-                                    gfig = graph_viewer.graph_to_figure(
-                                        g,
-                                        highlight_guids=(hl_guids if hl_graph else set()),
-                                        decoy_guids=(dc_guids if hl_graph else set()),
+                                if compare_g and m.get("parent_id"):
+                                    base = storage.get_ifc_model(m["parent_id"])
+                                    base_gp = base.get("graph_path") if base else None
+                                    if not (base_gp and Path(base_gp).exists()):
+                                        st.warning(
+                                            "Baseline'ın graph dosyası yok; "
+                                            "önce baseline detayında 'Şimdi üret ve kaydet' "
+                                            "ile oluştur."
+                                        )
+                                    else:
+                                        cgb, cgv = st.columns(2)
+                                        with cgb:
+                                            st.markdown(f"**Baseline**: `{base['name']}`")
+                                            gb = ifc_graph.load_graph(base_gp)
+                                            figb = graph_viewer.graph_to_figure(gb)
+                                            st.caption(
+                                                f"Düğüm: {gb.number_of_nodes()} · "
+                                                f"kenar: {gb.number_of_edges()} (vurgu yok)"
+                                            )
+                                            st.plotly_chart(
+                                                figb, use_container_width=True,
+                                                config={"scrollZoom": True,
+                                                        "displaylogo": False},
+                                            )
+                                        with cgv:
+                                            st.markdown(f"**İhlalli**: `{m['name']}`")
+                                            gv = ifc_graph.load_graph(gpath)
+                                            figv = graph_viewer.graph_to_figure(
+                                                gv,
+                                                highlight_guids=(hl_guids if hl_graph else set()),
+                                                decoy_guids=(dc_guids if hl_graph else set()),
+                                            )
+                                            st.caption(
+                                                f"Düğüm: {gv.number_of_nodes()} · "
+                                                f"kenar: {gv.number_of_edges()} · "
+                                                f"ihlal: {len(hl_guids)} · "
+                                                f"decoy: {len(dc_guids)}"
+                                            )
+                                            st.plotly_chart(
+                                                figv, use_container_width=True,
+                                                config={"scrollZoom": True,
+                                                        "displaylogo": False},
+                                            )
+                                else:
+                                    with st.spinner("Graph çiziliyor..."):
+                                        g = ifc_graph.load_graph(gpath)
+                                        gfig = graph_viewer.graph_to_figure(
+                                            g,
+                                            highlight_guids=(hl_guids if hl_graph else set()),
+                                            decoy_guids=(dc_guids if hl_graph else set()),
+                                        )
+                                    st.caption(
+                                        f"Düğüm: {g.number_of_nodes()}  ·  "
+                                        f"kenar: {g.number_of_edges()}"
+                                        + (f"  ·  ihlal: {len(hl_guids)}"
+                                           f"  ·  decoy: {len(dc_guids)}"
+                                           if (hl_guids or dc_guids) and hl_graph else "")
                                     )
-                                st.caption(
-                                    f"Düğüm: {g.number_of_nodes()}  ·  "
-                                    f"kenar: {g.number_of_edges()}"
-                                    + (f"  ·  ihlal: {len(hl_guids)}"
-                                       f"  ·  decoy: {len(dc_guids)}"
-                                       if (hl_guids or dc_guids) and hl_graph else "")
-                                )
-                                st.info(
-                                    "🖱️ Çekmek için fareyle sürükle (pan modu), "
-                                    "kaydırma tekerleğiyle yakınlaştır.",
-                                    icon="ℹ️",
-                                )
-                                st.plotly_chart(
-                                    gfig, use_container_width=True,
-                                    config={"scrollZoom": True,
-                                            "displaylogo": False},
-                                )
+                                    st.info(
+                                        "🖱️ Çekmek için fareyle sürükle (pan modu), "
+                                        "kaydırma tekerleğiyle yakınlaştır.",
+                                        icon="ℹ️",
+                                    )
+                                    st.plotly_chart(
+                                        gfig, use_container_width=True,
+                                        config={"scrollZoom": True,
+                                                "displaylogo": False},
+                                    )
                             except Exception as e:
                                 st.error(f"Graph görselleştirme hatası: {e}")
                         with open(gpath, "rb") as f:
