@@ -1008,16 +1008,48 @@ with top_ifc:
         else:
             variations = None
             name_prefix = "Auto"
+
+            kind_filter = st.radio(
+                "Kaynak tür filtresi",
+                ["baseline", "imported", "violated", "tümü"],
+                horizontal=True, index=3,
+                key="pipe_kind_filter",
+                help=(
+                    "baseline: pipeline ile üretilenler  ·  "
+                    "imported: dışarıdan içe aktarılanlar  ·  "
+                    "violated: önceden ihlal enjekte edilmiş "
+                    "(üst üste ihlal koymak için)  ·  "
+                    "tümü: hepsi"
+                ),
+            )
+            kinds = (
+                {"baseline"} if kind_filter == "baseline" else
+                {"imported"} if kind_filter == "imported" else
+                {"violated"} if kind_filter == "violated" else
+                {"baseline", "imported", "violated"}
+            )
             existing = [m for m in storage.list_ifc_models()
-                        if m["kind"] in ("baseline", "imported")
-                        and m["status"] == "ok"]
-            opt_ex = {m["id"]: f"[{m['kind']}] {m['name']}"
+                        if m["kind"] in kinds and m["status"] == "ok"]
+            opt_ex = {m["id"]: f"[{m['kind']}] {m['name']} · {m['id'][:8]}"
                       for m in existing}
+
+            # Hızlı seçim
+            ke = "pipe_existing"
+            cur = [i for i in st.session_state.get(ke, []) if i in opt_ex]
+            st.session_state[ke] = cur
+            qs1, qs2 = st.columns(2)
+            if qs1.button("Tümünü seç", key="pipe_btn_all"):
+                st.session_state[ke] = list(opt_ex.keys())
+                st.rerun()
+            if qs2.button("Seçimi temizle", key="pipe_btn_clr"):
+                st.session_state[ke] = []
+                st.rerun()
+
             existing_ids = st.multiselect(
-                "Kullanılacak baseline/imported IFC'ler",
+                f"Kullanılacak IFC'ler ({len(opt_ex)} adet uygun)",
                 list(opt_ex.keys()),
                 format_func=lambda k: opt_ex[k],
-                key="pipe_existing",
+                key=ke,
             )
 
         # Varyant + ihlal parametreleri
