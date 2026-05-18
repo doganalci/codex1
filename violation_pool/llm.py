@@ -80,6 +80,15 @@ def generate_optimized(user_prompt: str, model: str | None = None) -> list[dict]
     return _normalize(data.get("violations", []))
 
 
+def generate_finetuned(user_prompt: str, ft_model_id: str) -> list[dict]:
+    """Method 4: same optimized prompt as method 2, but call a fine-tuned model.
+
+    Fine-tune işi `finetune.py` üzerinden, standart dokümanlarla hazırlanır;
+    burada sadece üretilen FT model id'siyle pool çekiyoruz.
+    """
+    return generate_optimized(user_prompt, model=ft_model_id)
+
+
 def generate_rag(user_prompt: str, context_chunks: list[dict], model: str | None = None) -> list[dict]:
     """Method 3: same optimized prompt as method 2 + RAG context."""
     user_msg = build_user_message(user_prompt, context_chunks)

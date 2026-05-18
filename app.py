@@ -15,8 +15,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from violation_pool import excel_export, llm, rag, storage
+from violation_pool import excel_export, finetune, llm, rag, storage
 from violation_pool.config import (
+    METHOD_FINETUNE,
     METHOD_LABELS,
     METHOD_NAIVE,
     METHOD_OPTIMIZED,
@@ -96,7 +97,9 @@ else:
 # ---------- main ----------
 st.title("İhlal Havuzu Oluşturucu")
 
-tab_run, tab_view, tab_rag = st.tabs(["Çalıştır", "Havuzu Görüntüle", "RAG / Doküman"])
+tab_run, tab_view, tab_rag, tab_ft = st.tabs(
+    ["Çalıştır", "Havuzu Görüntüle", "RAG / Doküman", "Fine-tune"]
+)
 
 # =========================================================
 # RAG management tab
@@ -148,7 +151,7 @@ with tab_run:
 
     method = st.radio(
         "Yöntem",
-        [METHOD_NAIVE, METHOD_OPTIMIZED, METHOD_RAG],
+        [METHOD_NAIVE, METHOD_OPTIMIZED, METHOD_RAG, METHOD_FINETUNE],
         format_func=lambda m: METHOD_LABELS[m],
         horizontal=False,
     )
@@ -181,12 +184,23 @@ with tab_run:
 
     rag_collection = None
     top_k = 8
+    ft_model_id = None
     if method == METHOD_RAG:
         colls = rag.list_collections()
         if not colls:
             st.warning("RAG için önce 'RAG / Doküman' sekmesinden bir koleksiyon oluştur.")
         rag_collection = st.selectbox("RAG koleksiyonu", colls)
         top_k = st.slider("Getirilen parça sayısı (top-k)", 3, 20, 8)
+    elif method == METHOD_FINETUNE:
+        st.caption(
+            "Standart dokümanlarla eğitilmiş fine-tuned model id'sini gir. "
+            "FT işini 'Fine-tune' sekmesinden başlatabilirsin."
+        )
+        ft_model_id = st.text_input(
+            "Fine-tuned model id",
+            placeholder="ft:gpt-4o-mini-2024-07-18:org::id",
+            key="ft_model_id_input",
+        )
 
     # Resume vs fresh — only meaningful if there is an unsaved draft for this name+method
     existing_draft = next(
@@ -210,19 +224,24 @@ with tab_run:
         if method == METHOD_RAG and not rag_collection:
             st.error("RAG yönteminde koleksiyon seçmelisin.")
             st.stop()
+        if method == METHOD_FINETUNE and not ft_model_id:
+            st.error("Fine-tune yönteminde FT model id girmelisin.")
+            st.stop()
+
+        sidebar_llm = st.session_state.get("llm_model") or settings.llm_model
+        effective_llm = ft_model_id if method == METHOD_FINETUNE else sidebar_llm
 
         if resume and existing_draft:
             run_id = existing_draft["id"]
             st.info(f"Devam ediliyor: {run_id[:8]}")
         else:
-            # if there is a leftover draft for the same name+method, clear it
             if existing_draft:
                 storage.delete_run(existing_draft["id"])
             run_id = storage.create_run(
                 name=name,
                 method=method,
                 prompt=prompt,
-                llm_model=st.session_state.get("llm_model") or settings.llm_model,
+                llm_model=effective_llm,
                 embedding_model=(
                     st.session_state.get("embedding_model") or settings.embedding_model
                 )
@@ -230,21 +249,22 @@ with tab_run:
                 else None,
                 rag_collection=rag_collection if method == METHOD_RAG else None,
                 rag_documents=None,
+                finetune_model_id=ft_model_id if method == METHOD_FINETUNE else None,
             )
-
-        model = st.session_state.get("llm_model") or settings.llm_model
 
         try:
             with st.spinner("LLM çalışıyor..."):
                 if method == METHOD_NAIVE:
-                    items = llm.generate_naive(prompt, model=model)
+                    items = llm.generate_naive(prompt, model=sidebar_llm)
                 elif method == METHOD_OPTIMIZED:
-                    items = llm.generate_optimized(prompt, model=model)
-                else:
+                    items = llm.generate_optimized(prompt, model=sidebar_llm)
+                elif method == METHOD_RAG:
                     chunks = rag.retrieve(rag_collection, prompt, k=top_k)
                     if not chunks:
                         st.warning("RAG koleksiyonu boş veya eşleşme yok.")
-                    items = llm.generate_rag(prompt, chunks, model=model)
+                    items = llm.generate_rag(prompt, chunks, model=sidebar_llm)
+                else:  # METHOD_FINETUNE
+                    items = llm.generate_finetuned(prompt, ft_model_id=ft_model_id)
         except Exception as e:
             st.error(f"Hata: {e}")
             st.stop()
@@ -300,10 +320,11 @@ with tab_view:
             f"yöntem: {METHOD_LABELS.get(run['method'], run['method'])} · "
             f"durum: {run['status']}"
         )
-        meta_cols = st.columns(3)
+        meta_cols = st.columns(4)
         meta_cols[0].metric("LLM", run["llm_model"])
         meta_cols[1].metric("Embedding", run.get("embedding_model") or "-")
         meta_cols[2].metric("Koleksiyon", run.get("rag_collection") or "-")
+        meta_cols[3].metric("FT model", run.get("finetune_model_id") or "-")
         with st.expander("Kullanılan promt"):
             st.code(run["prompt"])
         vs = storage.get_violations(sel_id)
@@ -312,3 +333,67 @@ with tab_view:
         if st.button("Excel'e aktar", key=f"view_xls_{sel_id}"):
             out = excel_export.export_run(sel_id)
             st.success(f"Yazıldı: {out}")
+
+
+# =========================================================
+# Fine-tune tab
+# =========================================================
+with tab_ft:
+    st.subheader("Fine-tune (Yöntem 4)")
+    st.caption(
+        "Standart dokümanlardan sentetik eğitim verisi (JSONL) üretip "
+        "OpenAI fine-tune işini başlatır. Bittiğinde alınan model id "
+        "'Çalıştır' sekmesinde Yöntem 4 için kullanılır."
+    )
+
+    colls = rag.list_collections()
+    if not colls:
+        st.warning("Önce 'RAG / Doküman' sekmesinden bir koleksiyon hazırla.")
+    coll = st.selectbox("Kaynak koleksiyon", colls, key="ft_coll")
+    c1, c2, c3 = st.columns(3)
+    max_chunks = c1.number_input("Maks. parça", min_value=10, max_value=2000, value=200, step=10)
+    samples_per_chunk = c2.number_input("Parça başına örnek", 1, 5, 1)
+    base_model = c3.text_input("Base model", value=settings.llm_model)
+
+    if st.button("Eğitim verisi (JSONL) üret", disabled=not coll):
+        with st.spinner("Sentetik veri üretiliyor (LLM çağrıları)..."):
+            try:
+                p = finetune.build_training_jsonl(
+                    coll,
+                    samples_per_chunk=int(samples_per_chunk),
+                    max_chunks=int(max_chunks),
+                    base_model=base_model,
+                )
+                st.session_state["ft_jsonl_path"] = str(p)
+                st.success(f"JSONL hazır: {p}")
+            except Exception as e:
+                st.error(f"Hata: {e}")
+
+    jsonl_path = st.session_state.get("ft_jsonl_path")
+    if jsonl_path:
+        st.code(f"jsonl: {jsonl_path}")
+        if st.button("Fine-tune işini başlat"):
+            try:
+                with st.spinner("Dosya yükleniyor ve FT işi oluşturuluyor..."):
+                    info = finetune.start_finetune_job(Path(jsonl_path), base_model)
+                st.success(f"Job: {info['job_id']}  ·  status: {info['status']}")
+            except Exception as e:
+                st.error(f"Hata: {e}")
+
+    st.divider()
+    st.markdown("**Fine-tune işleri**")
+    if st.button("Listele / yenile"):
+        try:
+            st.session_state["ft_jobs"] = finetune.list_jobs(limit=20)
+        except Exception as e:
+            st.error(f"Hata: {e}")
+    jobs = st.session_state.get("ft_jobs", [])
+    if jobs:
+        st.dataframe(pd.DataFrame(jobs), use_container_width=True)
+
+    job_id = st.text_input("Job id (durum sorgu)")
+    if job_id and st.button("Durumu getir"):
+        try:
+            st.json(finetune.job_status(job_id.strip()))
+        except Exception as e:
+            st.error(f"Hata: {e}")

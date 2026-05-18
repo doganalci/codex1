@@ -50,6 +50,7 @@ def export_run(run_id: str) -> Path:
         {"key": "embedding_model", "value": run.get("embedding_model")},
         {"key": "rag_collection", "value": run.get("rag_collection")},
         {"key": "rag_documents", "value": run.get("rag_documents")},
+        {"key": "finetune_model_id", "value": run.get("finetune_model_id")},
         {"key": "created_at", "value": run["created_at"]},
         {"key": "updated_at", "value": run["updated_at"]},
         {"key": "prompt", "value": run["prompt"]},

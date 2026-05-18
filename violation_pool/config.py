@@ -32,9 +32,11 @@ settings.ensure_dirs()
 METHOD_NAIVE = "naive"
 METHOD_OPTIMIZED = "optimized"
 METHOD_RAG = "rag"
+METHOD_FINETUNE = "finetune"
 
 METHOD_LABELS = {
-    METHOD_NAIVE: "1) Yalın Prompt (LLM, ek işlem yok)",
-    METHOD_OPTIMIZED: "2) Optimize Prompt (LLM)",
-    METHOD_RAG: "3) RAG + Optimize Prompt (Doküman bazlı)",
+    METHOD_NAIVE: "1) Tek Promt (LLM, ek işlem yok)",
+    METHOD_OPTIMIZED: "2) İyileştirilmiş Tek Promt (LLM)",
+    METHOD_RAG: "3) Standart dosyalar + RAG + LLM",
+    METHOD_FINETUNE: "4) Standart dosyalar + Fine-tune LLM",
 }

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS runs (
     embedding_model TEXT,
     rag_collection TEXT,
     rag_documents TEXT,          -- json list
+    finetune_model_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -67,6 +68,10 @@ def init_db() -> None:
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
     with _conn() as c:
         c.executescript(SCHEMA)
+        # idempotent migration for older DBs
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(runs)").fetchall()}
+        if "finetune_model_id" not in cols:
+            c.execute("ALTER TABLE runs ADD COLUMN finetune_model_id TEXT")
 
 
 def now() -> str:
@@ -82,14 +87,16 @@ def create_run(
     embedding_model: str | None,
     rag_collection: str | None,
     rag_documents: list[str] | None,
+    finetune_model_id: str | None = None,
 ) -> str:
     rid = str(uuid.uuid4())
     ts = now()
     with _conn() as c:
         c.execute(
             """INSERT INTO runs(id, name, method, status, prompt, llm_model,
-               embedding_model, rag_collection, rag_documents, created_at, updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               embedding_model, rag_collection, rag_documents, finetune_model_id,
+               created_at, updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 rid,
                 name,
@@ -100,6 +107,7 @@ def create_run(
                 embedding_model,
                 rag_collection,
                 json.dumps(rag_documents or []),
+                finetune_model_id,
                 ts,
                 ts,
             ),
