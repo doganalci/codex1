@@ -18,11 +18,15 @@ class Settings:
     vectorstore_dir: Path = Path(os.getenv("VECTORSTORE_DIR", "./vectorstore"))
     db_path: Path = Path(os.getenv("DB_PATH", "./violation_pool.sqlite"))
     export_dir: Path = Path(os.getenv("EXPORT_DIR", "./exports"))
+    ifc_dir: Path = Path(os.getenv("IFC_DIR", "./ifc_models"))
+    ifc_llm_model: str = os.getenv("IFC_LLM_MODEL", "gpt-4o-mini")
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.vectorstore_dir.mkdir(parents=True, exist_ok=True)
         self.export_dir.mkdir(parents=True, exist_ok=True)
+        (self.ifc_dir / "baseline").mkdir(parents=True, exist_ok=True)
+        (self.ifc_dir / "violated").mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from violation_pool import excel_export, finetune, llm, rag, storage
+from violation_pool import excel_export, finetune, ifc_gen, ifc_inject, llm, rag, storage
 from violation_pool.config import (
     METHOD_FINETUNE,
     METHOD_LABELS,
@@ -97,11 +97,14 @@ else:
 
 
 # ---------- main ----------
-st.title("İhlal Havuzu Oluşturucu")
+st.title("İhlal Havuzu & IFC Stüdyosu")
 
-tab_run, tab_view, tab_rag, tab_ft = st.tabs(
-    ["Çalıştır", "Havuzu Görüntüle", "RAG / Doküman", "Fine-tune"]
-)
+top_pool, top_ifc = st.tabs(["İhlal Havuzu Oluşturma", "İhlalli IFC Oluşturma"])
+
+with top_pool:
+    tab_run, tab_view, tab_rag, tab_ft = st.tabs(
+        ["Çalıştır", "Havuzu Görüntüle", "RAG / Doküman", "Fine-tune"]
+    )
 
 # =========================================================
 # RAG management tab
@@ -503,3 +506,164 @@ with tab_ft:
             st.json(finetune.job_status(job_id.strip()))
         except Exception as e:
             st.error(f"Hata: {e}")
+
+
+# =========================================================
+# İhlalli IFC Oluşturma — üst seviye 2. sekme
+# =========================================================
+with top_ifc:
+    ifc_t1, ifc_t2, ifc_t3 = st.tabs(
+        ["Baseline IFC üret", "İhlal enjekte et", "IFC'leri görüntüle"]
+    )
+
+    # -------- Baseline üretimi --------
+    with ifc_t1:
+        st.subheader("İhlalsiz baseline IFC üret")
+        st.caption(
+            "LLM tam IFC4 STEP metni üretir; ifcopenshell ile parse edilir. "
+            "Parse başarısızsa 1 retry yapılır. Tüm boyutlar bilinçli olarak "
+            "cömert tutulur — bu dosyalarda ihlal olmamalı."
+        )
+        c1, c2 = st.columns([2, 1])
+        bn_prefix = c1.text_input("İsim öneki", value="House")
+        bn_count = c2.number_input("Adet", 1, 20, 4)
+        bn_model = st.text_input("IFC LLM modeli", value=settings.ifc_llm_model)
+        bn_prompt = st.text_area(
+            "Promt (baseline)",
+            value=(
+                "Tek aileli, küçük bir konutun tam IFC4 dosyasını üret. "
+                "Tüm boyutlar mevzuata fazlasıyla uygun (ihlalsiz) olsun. "
+                "Sadece geçerli SPF metni döndür."
+            ),
+            height=120,
+        )
+        if st.button("Baseline IFC'leri üret", type="primary"):
+            with st.spinner(f"{bn_count} adet baseline üretiliyor (LLM)..."):
+                try:
+                    res = ifc_gen.generate_baselines(
+                        n=int(bn_count), seed_prompt=bn_prompt,
+                        model=bn_model.strip() or None, name_prefix=bn_prefix,
+                    )
+                    df = pd.DataFrame([{
+                        "id": r["ifc_model_id"][:8],
+                        "status": r["status"],
+                        "ifc": r["ifc_path"],
+                        "error": r["error"],
+                    } for r in res])
+                    st.dataframe(df, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Hata: {e}")
+
+    # -------- Enjeksiyon --------
+    with ifc_t2:
+        st.subheader("Baseline'a havuzdan ihlal enjekte et")
+
+        baselines = [m for m in storage.list_ifc_models("baseline")
+                     if m["status"] == "ok"]
+        if not baselines:
+            st.warning("Önce geçerli (status=ok) baseline IFC üretmelisin.")
+        bo = {m["id"]: f"{m['name']} · {m['id'][:8]} · {m['created_at']}"
+              for m in baselines}
+        sel_base = st.selectbox("Baseline IFC", list(bo.keys()) or [""],
+                                format_func=lambda k: bo.get(k, "-"))
+
+        saved_pools = [r for r in storage.list_runs() if r["status"] == "saved"]
+        po = {r["id"]: f"{r['name']} · {METHOD_LABELS.get(r['method'], r['method'])}"
+              for r in saved_pools}
+        sel_pool = st.selectbox("İhlal havuzu (run)", list(po.keys()) or [""],
+                                format_func=lambda k: po.get(k, "-"))
+
+        c1, c2, c3 = st.columns(3)
+        inj_n = c1.number_input("Enjekte edilecek ihlal sayısı", 1, 100, 10)
+        inj_cat = c2.text_input("Kategori filtresi (boş = hepsi)")
+        inj_seed = c3.number_input("Tohum (rastgele seçim)", 0, 10_000, 42)
+        inj_model = st.text_input("Enjeksiyon LLM modeli",
+                                  value=settings.ifc_llm_model)
+
+        if st.button("İhlal enjekte et", type="primary",
+                     disabled=not (sel_base and sel_pool)):
+            try:
+                pool_vs = storage.get_violations(sel_pool)
+                picked = ifc_inject.pick_violations(
+                    pool_vs, n=int(inj_n),
+                    category=(inj_cat.strip() or None),
+                    seed=int(inj_seed),
+                )
+                if not picked:
+                    st.warning("Filtreyle eşleşen ihlal yok.")
+                    st.stop()
+                with st.spinner(f"{len(picked)} ihlal enjekte ediliyor..."):
+                    out = ifc_inject.inject_violations(
+                        baseline_id=sel_base, violations=picked,
+                        pool_run_id=sel_pool,
+                        model=inj_model.strip() or None,
+                        selection_filter={"category": inj_cat or None,
+                                          "n": int(inj_n),
+                                          "seed": int(inj_seed)},
+                    )
+                st.success(
+                    f"Bitti. Uygulanan: {out['summary']['applied']}, "
+                    f"atlanan: {out['summary']['skipped']}.\n"
+                    f"IFC: {out['ifc_path']}\nLabels: {out['labels_path']}"
+                )
+            except Exception as e:
+                st.error(f"Hata: {e}")
+
+    # -------- Görüntüleme --------
+    with ifc_t3:
+        st.subheader("Üretilmiş IFC'ler")
+        kind = st.radio("Tür", ["baseline", "violated"], horizontal=True)
+        models = storage.list_ifc_models(kind)
+        if not models:
+            st.caption("Bu türde IFC henüz yok.")
+        else:
+            df = pd.DataFrame([{
+                "id": m["id"][:8],
+                "name": m["name"],
+                "status": m["status"],
+                "llm": m["llm_model"],
+                "parent": (m["parent_id"] or "")[:8],
+                "pool": (m["pool_run_id"] or "")[:8],
+                "created_at": m["created_at"],
+                "file": m["file_path"],
+            } for m in models])
+            st.dataframe(df, use_container_width=True)
+
+            opt = {m["id"]: f"{m['name']} · {m['id'][:8]}" for m in models}
+            sel = st.selectbox("Detay", list(opt.keys()),
+                               format_func=lambda k: opt[k])
+            m = storage.get_ifc_model(sel)
+            cols = st.columns(3)
+            with open(m["file_path"], "rb") as f:
+                cols[0].download_button("IFC indir", f,
+                                        file_name=Path(m["file_path"]).name)
+            if m.get("labels_path"):
+                with open(m["labels_path"], "rb") as f:
+                    cols[1].download_button("Labels JSON indir", f,
+                                            file_name=Path(m["labels_path"]).name)
+            if m.get("meta_path"):
+                with open(m["meta_path"], "rb") as f:
+                    cols[2].download_button("Meta JSON indir", f,
+                                            file_name=Path(m["meta_path"]).name)
+
+            if kind == "violated":
+                labs = storage.get_ifc_labels(sel)
+                if labs:
+                    ldf = pd.DataFrame([{
+                        "status": l["status"],
+                        "title": l["title"],
+                        "category": l["category"],
+                        "severity": l["severity"],
+                        "ifc_type": l["ifc_type"],
+                        "ifc_name": l["ifc_name"],
+                        "attribute": l["attribute"],
+                        "before": l["value_before"],
+                        "after": l["value_after"],
+                        "reason": l["reason"],
+                    } for l in labs])
+                    st.markdown("**İhlal etiketleri**")
+                    st.dataframe(ldf, use_container_width=True)
+
+            if st.button("Bu kaydı sil", key=f"del_ifc_{sel}"):
+                storage.delete_ifc_model(sel)
+                st.rerun()

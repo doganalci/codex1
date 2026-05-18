@@ -50,6 +50,44 @@ CREATE TABLE IF NOT EXISTS evidence (
     snippet TEXT,
     FOREIGN KEY(violation_id) REFERENCES violations(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS ifc_models (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,             -- 'baseline' | 'violated'
+    name TEXT NOT NULL,
+    parent_id TEXT,                 -- violated -> baseline id
+    llm_model TEXT NOT NULL,
+    prompt TEXT,
+    pool_run_id TEXT,               -- violated için kullanılan ihlal havuzu
+    params_json TEXT,
+    file_path TEXT NOT NULL,
+    meta_path TEXT,
+    labels_path TEXT,
+    status TEXT NOT NULL,           -- 'ok' | 'invalid' | 'partial'
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ifc_violation_labels (
+    id TEXT PRIMARY KEY,
+    ifc_model_id TEXT NOT NULL,
+    violation_id TEXT,              -- havuzdaki violation id
+    title TEXT,
+    category TEXT,
+    severity TEXT,
+    threshold TEXT,
+    ifc_global_id TEXT,
+    ifc_type TEXT,
+    ifc_name TEXT,
+    attribute TEXT,
+    value_before TEXT,
+    value_after TEXT,
+    evidence_json TEXT,
+    status TEXT NOT NULL,           -- 'applied' | 'skipped'
+    reason TEXT,
+    applied_at TEXT NOT NULL,
+    FOREIGN KEY(ifc_model_id) REFERENCES ifc_models(id) ON DELETE CASCADE
+);
 """
 
 
@@ -227,3 +265,94 @@ def count_violations(run_id: str) -> int:
     with _conn() as c:
         r = c.execute("SELECT COUNT(*) c FROM violations WHERE run_id=?", (run_id,)).fetchone()
     return int(r["c"])
+
+
+# ---------- IFC models ----------
+def create_ifc_model(
+    *,
+    kind: str,
+    name: str,
+    parent_id: str | None,
+    llm_model: str,
+    prompt: str | None,
+    pool_run_id: str | None,
+    params: dict | None,
+    file_path: str,
+    meta_path: str | None,
+    labels_path: str | None,
+    status: str,
+    error: str | None = None,
+) -> str:
+    mid = str(uuid.uuid4())
+    with _conn() as c:
+        c.execute(
+            """INSERT INTO ifc_models(id, kind, name, parent_id, llm_model, prompt,
+               pool_run_id, params_json, file_path, meta_path, labels_path,
+               status, error, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                mid, kind, name, parent_id, llm_model, prompt, pool_run_id,
+                json.dumps(params or {}, ensure_ascii=False),
+                file_path, meta_path, labels_path, status, error, now(),
+            ),
+        )
+    return mid
+
+
+def list_ifc_models(kind: str | None = None) -> list[dict]:
+    q = "SELECT * FROM ifc_models"
+    args: tuple = ()
+    if kind:
+        q += " WHERE kind=?"
+        args = (kind,)
+    q += " ORDER BY datetime(created_at) DESC"
+    with _conn() as c:
+        rows = c.execute(q, args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_ifc_model(ifc_id: str) -> dict | None:
+    with _conn() as c:
+        r = c.execute("SELECT * FROM ifc_models WHERE id=?", (ifc_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def delete_ifc_model(ifc_id: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM ifc_models WHERE id=?", (ifc_id,))
+
+
+def add_ifc_labels(ifc_model_id: str, labels: Iterable[dict]) -> int:
+    n = 0
+    ts = now()
+    with _conn() as c:
+        for lab in labels:
+            c.execute(
+                """INSERT INTO ifc_violation_labels(id, ifc_model_id, violation_id,
+                   title, category, severity, threshold, ifc_global_id, ifc_type,
+                   ifc_name, attribute, value_before, value_after, evidence_json,
+                   status, reason, applied_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    str(uuid.uuid4()), ifc_model_id, lab.get("violation_id"),
+                    lab.get("title"), lab.get("category"), lab.get("severity"),
+                    lab.get("threshold"), lab.get("ifc_global_id"),
+                    lab.get("ifc_type"), lab.get("ifc_name"),
+                    lab.get("attribute"),
+                    str(lab.get("value_before")) if lab.get("value_before") is not None else None,
+                    str(lab.get("value_after")) if lab.get("value_after") is not None else None,
+                    json.dumps(lab.get("evidence") or [], ensure_ascii=False),
+                    lab.get("status", "applied"), lab.get("reason"), ts,
+                ),
+            )
+            n += 1
+    return n
+
+
+def get_ifc_labels(ifc_model_id: str) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM ifc_violation_labels WHERE ifc_model_id=? ORDER BY applied_at",
+            (ifc_model_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
