@@ -15,18 +15,23 @@ def export_run(run_id: str) -> Path:
         raise ValueError(f"Run bulunamadı: {run_id}")
     violations = storage.get_violations(run_id)
 
+    prompt_short = (run["prompt"] or "")[:120].replace("\n", " ")
     v_rows = []
     e_rows = []
     for v in violations:
         v_rows.append(
             {
                 "violation_id": v["id"],
+                "batch_no": v.get("batch_no"),
+                "method": run["method"],
                 "title": v.get("title"),
                 "description": v["description"],
                 "category": v.get("category"),
                 "severity": v.get("severity"),
                 "threshold": v.get("threshold"),
                 "evidence_count": len(v.get("evidence", [])),
+                "llm_model": run["llm_model"],
+                "prompt_short": prompt_short,
                 "created_at": v.get("created_at"),
             }
         )
@@ -34,6 +39,7 @@ def export_run(run_id: str) -> Path:
             e_rows.append(
                 {
                     "violation_id": v["id"],
+                    "batch_no": v.get("batch_no"),
                     "document": ev.get("document"),
                     "page": ev.get("page"),
                     "clause": ev.get("clause"),

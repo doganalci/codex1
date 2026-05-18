@@ -46,59 +46,86 @@ def _normalize(items: list[dict]) -> list[dict]:
     return out
 
 
-def generate_naive(user_prompt: str, model: str | None = None) -> list[dict]:
-    """Method 1: send the user prompt as-is, with a thin JSON instruction.
+def _count_suffix(n: int, avoid: list[str] | None = None) -> str:
+    s = f"\n\nTam olarak {n} adet ihlal üret."
+    if avoid:
+        # Sadece title bazlı kısa liste; çok uzun olmasın diye ilk 50 ile sınırla
+        s += (
+            "\nAşağıdaki ihlalleri TEKRARLAMA, bunlardan farklı olanları üret:\n- "
+            + "\n- ".join(avoid[:50])
+        )
+    return s
 
-    Kullanıcının yazdığı promt korunur; sadece çıktıyı parse edebilmek için
-    minimum bir JSON yönergesi eklenir.
-    """
+
+def generate_naive(
+    user_prompt: str,
+    model: str | None = None,
+    n: int = 20,
+    avoid_titles: list[str] | None = None,
+) -> list[dict]:
+    """Method 1: send the user prompt as-is, with a thin JSON instruction."""
     msg = (
         user_prompt.strip()
-        + '\n\nLütfen sonucu yalnızca şu JSON formatında ver: {"violations":[{"description":"..."}]}'
+        + _count_suffix(n, avoid_titles)
+        + '\n\nLütfen sonucu yalnızca şu JSON formatında ver: '
+          '{"violations":[{"description":"..."}]}'
     )
     resp = _client().chat.completions.create(
         model=model or settings.llm_model,
         messages=[{"role": "user", "content": msg}],
-        temperature=0.3,
+        temperature=0.4,
     )
     data = _extract_json(resp.choices[0].message.content or "")
     return _normalize(data.get("violations", []))
 
 
-def generate_optimized(user_prompt: str, model: str | None = None) -> list[dict]:
+def generate_optimized(
+    user_prompt: str,
+    model: str | None = None,
+    n: int = 20,
+    avoid_titles: list[str] | None = None,
+) -> list[dict]:
     """Method 2: optimized system prompt + user prompt, no context."""
-    resp = _client().chat.completions.create(
-        model=model or settings.llm_model,
-        messages=[
-            {"role": "system", "content": OPTIMIZED_PROMPT},
-            {"role": "user", "content": user_prompt.strip()},
-        ],
-        temperature=0.2,
-        response_format={"type": "json_object"},
-    )
-    data = _extract_json(resp.choices[0].message.content or "")
-    return _normalize(data.get("violations", []))
-
-
-def generate_finetuned(user_prompt: str, ft_model_id: str) -> list[dict]:
-    """Method 4: same optimized prompt as method 2, but call a fine-tuned model.
-
-    Fine-tune işi `finetune.py` üzerinden, standart dokümanlarla hazırlanır;
-    burada sadece üretilen FT model id'siyle pool çekiyoruz.
-    """
-    return generate_optimized(user_prompt, model=ft_model_id)
-
-
-def generate_rag(user_prompt: str, context_chunks: list[dict], model: str | None = None) -> list[dict]:
-    """Method 3: same optimized prompt as method 2 + RAG context."""
-    user_msg = build_user_message(user_prompt, context_chunks)
+    user_msg = user_prompt.strip() + _count_suffix(n, avoid_titles)
     resp = _client().chat.completions.create(
         model=model or settings.llm_model,
         messages=[
             {"role": "system", "content": OPTIMIZED_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        temperature=0.2,
+        temperature=0.3,
+        response_format={"type": "json_object"},
+    )
+    data = _extract_json(resp.choices[0].message.content or "")
+    return _normalize(data.get("violations", []))
+
+
+def generate_finetuned(
+    user_prompt: str,
+    ft_model_id: str,
+    n: int = 20,
+    avoid_titles: list[str] | None = None,
+) -> list[dict]:
+    """Method 4: same optimized prompt as method 2, but call a fine-tuned model."""
+    return generate_optimized(user_prompt, model=ft_model_id, n=n, avoid_titles=avoid_titles)
+
+
+def generate_rag(
+    user_prompt: str,
+    context_chunks: list[dict],
+    model: str | None = None,
+    n: int = 20,
+    avoid_titles: list[str] | None = None,
+) -> list[dict]:
+    """Method 3: same optimized prompt as method 2 + RAG context."""
+    user_msg = build_user_message(user_prompt, context_chunks) + _count_suffix(n, avoid_titles)
+    resp = _client().chat.completions.create(
+        model=model or settings.llm_model,
+        messages=[
+            {"role": "system", "content": OPTIMIZED_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.3,
         response_format={"type": "json_object"},
     )
     data = _extract_json(resp.choices[0].message.content or "")

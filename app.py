@@ -38,6 +38,7 @@ def _violations_df(items: list[dict]) -> pd.DataFrame:
         ev = v.get("evidence") or []
         rows.append(
             {
+                "batch": v.get("batch_no"),
                 "title": v.get("title"),
                 "description": v.get("description"),
                 "category": v.get("category"),
@@ -49,13 +50,14 @@ def _violations_df(items: list[dict]) -> pd.DataFrame:
                 )
                 if ev
                 else "",
+                "created_at": v.get("created_at"),
             }
         )
     return pd.DataFrame(rows)
 
 
 def _reset_draft():
-    for k in ("draft_run_id", "draft_items", "draft_method"):
+    for k in ("draft_run_id", "draft_items", "draft_method", "draft_is_append"):
         st.session_state.pop(k, None)
 
 
@@ -147,20 +149,67 @@ with tab_rag:
 # Run tab
 # =========================================================
 with tab_run:
-    st.subheader("Yeni çalıştırma")
+    st.subheader("Çalıştırma")
 
-    method = st.radio(
-        "Yöntem",
-        [METHOD_NAIVE, METHOD_OPTIMIZED, METHOD_RAG, METHOD_FINETUNE],
-        format_func=lambda m: METHOD_LABELS[m],
-        horizontal=False,
+    mode = st.radio(
+        "Mod",
+        ["Yeni havuz", "Mevcut havuza ekle"],
+        horizontal=True,
+        key="run_mode",
     )
 
-    name = st.text_input("Çalıştırma adı", value="run-1")
+    append_run: dict | None = None
+    if mode == "Mevcut havuza ekle":
+        saved = [r for r in storage.list_runs() if r["status"] == "saved"]
+        if not saved:
+            st.warning("Henüz kaydedilmiş havuz yok.")
+            st.stop()
+        opt = {
+            r["id"]: f"{r['name']} · {METHOD_LABELS.get(r['method'], r['method'])} · "
+                     f"{r['llm_model']} · {r['updated_at']}"
+            for r in saved
+        }
+        sel = st.selectbox(
+            "Devam edilecek havuz", list(opt.keys()), format_func=lambda k: opt[k]
+        )
+        append_run = storage.get_run(sel)
+        st.caption(
+            "Konfigürasyon (yöntem, promt, model, koleksiyon, FT model) bu havuzdan "
+            "alınır; yeni ihlaller aynı Excel dosyasına eklenir."
+        )
+        with st.expander("Bu havuzun konfigürasyonu", expanded=False):
+            st.json({k: append_run.get(k) for k in (
+                "method", "llm_model", "embedding_model", "rag_collection",
+                "finetune_model_id", "prompt"
+            )})
 
-    # Prompt: Method 1 has its own; Methods 2 and 3 share the same prompt
+    if append_run:
+        method = append_run["method"]
+        name = append_run["name"]
+        st.info(
+            f"Yöntem: **{METHOD_LABELS.get(method, method)}**  ·  "
+            f"havuz: **{name}** (`{append_run['id'][:8]}`)"
+        )
+    else:
+        method = st.radio(
+            "Yöntem",
+            [METHOD_NAIVE, METHOD_OPTIMIZED, METHOD_RAG, METHOD_FINETUNE],
+            format_func=lambda m: METHOD_LABELS[m],
+            horizontal=False,
+        )
+        name = st.text_input("Çalıştırma adı", value="run-1")
+
+    n_violations = st.number_input(
+        "Üretilecek ihlal sayısı", min_value=1, max_value=200, value=20, step=1
+    )
+
+    # Prompt: Method 1 has its own; Methods 2, 3 and 4 share the same prompt
     # to allow fair comparison across models.
-    if method == METHOD_NAIVE:
+    if append_run:
+        prompt = append_run["prompt"]
+        with st.expander("Kullanılan promt (kilitli)", expanded=False):
+            st.code(prompt)
+    elif method == METHOD_NAIVE:
         st.caption("Yöntem 1: senin yazdığın promt LLM'e olduğu gibi gider.")
         prompt = st.text_area(
             "Promt (Yöntem 1)",
@@ -170,11 +219,11 @@ with tab_run:
         )
     else:
         st.caption(
-            "Yöntem 2 ve 3 **aynı promtu** kullanır. Promtu burada bir kez yaz; "
-            "her iki yöntemde de aynısı kullanılır (model karşılaştırması adil olsun)."
+            "Yöntem 2, 3 ve 4 **aynı promtu** kullanır. Promtu burada bir kez yaz; "
+            "üç yöntemde de aynısı kullanılır (model karşılaştırması adil olsun)."
         )
         prompt = st.text_area(
-            "Promt (Yöntem 2 & 3 ortak)",
+            "Promt (Yöntem 2 & 3 & 4 ortak)",
             value=st.session_state.get("shared_prompt", llm.default_prompt_for(METHOD_OPTIMIZED)),
             height=160,
             key="shared_prompt",
@@ -186,39 +235,49 @@ with tab_run:
     top_k = 8
     ft_model_id = None
     if method == METHOD_RAG:
-        colls = rag.list_collections()
-        if not colls:
-            st.warning("RAG için önce 'RAG / Doküman' sekmesinden bir koleksiyon oluştur.")
-        rag_collection = st.selectbox("RAG koleksiyonu", colls)
+        if append_run:
+            rag_collection = append_run.get("rag_collection")
+            st.info(f"Koleksiyon: `{rag_collection}` (kilitli)")
+        else:
+            colls = rag.list_collections()
+            if not colls:
+                st.warning("RAG için önce 'RAG / Doküman' sekmesinden bir koleksiyon oluştur.")
+            rag_collection = st.selectbox("RAG koleksiyonu", colls)
         top_k = st.slider("Getirilen parça sayısı (top-k)", 3, 20, 8)
     elif method == METHOD_FINETUNE:
-        st.caption(
-            "Standart dokümanlarla eğitilmiş fine-tuned model id'sini gir. "
-            "FT işini 'Fine-tune' sekmesinden başlatabilirsin."
-        )
-        ft_model_id = st.text_input(
-            "Fine-tuned model id",
-            placeholder="ft:gpt-4o-mini-2024-07-18:org::id",
-            key="ft_model_id_input",
-        )
+        if append_run:
+            ft_model_id = append_run.get("finetune_model_id")
+            st.info(f"FT model: `{ft_model_id}` (kilitli)")
+        else:
+            st.caption(
+                "Standart dokümanlarla eğitilmiş fine-tuned model id'sini gir. "
+                "FT işini 'Fine-tune' sekmesinden başlatabilirsin."
+            )
+            ft_model_id = st.text_input(
+                "Fine-tuned model id",
+                placeholder="ft:gpt-4o-mini-2024-07-18:org::id",
+                key="ft_model_id_input",
+            )
 
-    # Resume vs fresh — only meaningful if there is an unsaved draft for this name+method
-    existing_draft = next(
-        (
-            r
-            for r in storage.list_runs()
-            if r["status"] == "draft" and r["name"] == name and r["method"] == method
-        ),
-        None,
-    )
+    # Resume vs fresh — only for unsaved drafts in "new pool" mode
+    existing_draft = None
     resume = False
-    if existing_draft:
-        choice = st.radio(
-            f"Bu isimde **yarım kalmış** ({existing_draft['id'][:8]}) bir çalıştırma var. Ne yapayım?",
-            ["Kaldığı yerden devam et", "Tamamen baştan başla"],
-            horizontal=True,
+    if not append_run:
+        existing_draft = next(
+            (
+                r
+                for r in storage.list_runs()
+                if r["status"] == "draft" and r["name"] == name and r["method"] == method
+            ),
+            None,
         )
-        resume = choice.startswith("Kaldığı")
+        if existing_draft:
+            choice = st.radio(
+                f"Bu isimde **yarım kalmış** ({existing_draft['id'][:8]}) bir çalıştırma var. Ne yapayım?",
+                ["Kaldığı yerden devam et", "Tamamen baştan başla"],
+                horizontal=True,
+            )
+            resume = choice.startswith("Kaldığı")
 
     if st.button("Çalıştır", type="primary"):
         if method == METHOD_RAG and not rag_collection:
@@ -229,9 +288,14 @@ with tab_run:
             st.stop()
 
         sidebar_llm = st.session_state.get("llm_model") or settings.llm_model
-        effective_llm = ft_model_id if method == METHOD_FINETUNE else sidebar_llm
+        effective_llm = (
+            append_run["llm_model"] if append_run
+            else (ft_model_id if method == METHOD_FINETUNE else sidebar_llm)
+        )
 
-        if resume and existing_draft:
+        if append_run:
+            run_id = append_run["id"]
+        elif resume and existing_draft:
             run_id = existing_draft["id"]
             st.info(f"Devam ediliyor: {run_id[:8]}")
         else:
@@ -252,52 +316,94 @@ with tab_run:
                 finetune_model_id=ft_model_id if method == METHOD_FINETUNE else None,
             )
 
+        # Append modunda, mevcut başlıkları LLM'e "tekrarlama" diye veriyoruz
+        avoid_titles = None
+        if append_run:
+            avoid_titles = [
+                (v.get("title") or v.get("description") or "")[:120]
+                for v in storage.get_violations(run_id)
+            ]
+
         try:
             with st.spinner("LLM çalışıyor..."):
                 if method == METHOD_NAIVE:
-                    items = llm.generate_naive(prompt, model=sidebar_llm)
+                    items = llm.generate_naive(
+                        prompt, model=effective_llm, n=int(n_violations),
+                        avoid_titles=avoid_titles,
+                    )
                 elif method == METHOD_OPTIMIZED:
-                    items = llm.generate_optimized(prompt, model=sidebar_llm)
+                    items = llm.generate_optimized(
+                        prompt, model=effective_llm, n=int(n_violations),
+                        avoid_titles=avoid_titles,
+                    )
                 elif method == METHOD_RAG:
                     chunks = rag.retrieve(rag_collection, prompt, k=top_k)
                     if not chunks:
                         st.warning("RAG koleksiyonu boş veya eşleşme yok.")
-                    items = llm.generate_rag(prompt, chunks, model=sidebar_llm)
+                    items = llm.generate_rag(
+                        prompt, chunks, model=effective_llm, n=int(n_violations),
+                        avoid_titles=avoid_titles,
+                    )
                 else:  # METHOD_FINETUNE
-                    items = llm.generate_finetuned(prompt, ft_model_id=ft_model_id)
+                    items = llm.generate_finetuned(
+                        prompt, ft_model_id=effective_llm, n=int(n_violations),
+                        avoid_titles=avoid_titles,
+                    )
         except Exception as e:
             st.error(f"Hata: {e}")
             st.stop()
 
-        storage.add_violations(run_id, items)
+        added = storage.add_violations(run_id, items)
         st.session_state["draft_run_id"] = run_id
         st.session_state["draft_method"] = method
-        st.success(f"{len(items)} ihlal üretildi. Aşağıdan inceleyip kaydet/iptal et.")
+        st.session_state["draft_is_append"] = bool(append_run)
+        if append_run:
+            st.success(
+                f"{added} ihlal **eklendi**. Toplam: "
+                f"{storage.count_violations(run_id)}. Aşağıdan onaylayıp Excel'i tazele."
+            )
+        else:
+            st.success(f"{added} ihlal üretildi. Aşağıdan inceleyip kaydet/iptal et.")
 
-    # Draft preview & confirm
+    # Preview & confirm
     draft_id = st.session_state.get("draft_run_id")
+    is_append = st.session_state.get("draft_is_append", False)
     if draft_id:
         run = storage.get_run(draft_id)
-        if run and run["status"] == "draft":
+        if run:
             st.divider()
-            st.subheader(f"Taslak: {run['name']} ({run['id'][:8]})")
+            label = "Mevcut havuza eklendi" if is_append else "Taslak"
+            st.subheader(f"{label}: {run['name']} ({run['id'][:8]})")
             vs = storage.get_violations(draft_id)
             st.dataframe(_violations_df(vs), use_container_width=True)
 
-            c1, c2, c3 = st.columns(3)
-            if c1.button("Kaydet (onayla)", type="primary"):
-                storage.mark_saved(draft_id)
-                out = excel_export.export_run(draft_id)
-                st.success(f"Kaydedildi. Excel: {out}")
-                _reset_draft()
-                st.rerun()
-            if c2.button("Excel önizleme"):
-                out = excel_export.export_run(draft_id)
-                st.info(f"Excel yazıldı: {out}")
-            if c3.button("İptal et (sil)"):
-                storage.delete_run(draft_id)
-                _reset_draft()
-                st.rerun()
+            if is_append:
+                last_batch = max((v.get("batch_no") or 1) for v in vs) if vs else 1
+                c1, c2 = st.columns(2)
+                if c1.button("Excel'i tazele (onayla)", type="primary"):
+                    out = excel_export.export_run(draft_id)
+                    st.success(f"Excel güncellendi: {out}")
+                    _reset_draft()
+                    st.rerun()
+                if c2.button(f"Son batch'i geri al (batch={last_batch})"):
+                    storage.delete_batch(draft_id, last_batch)
+                    _reset_draft()
+                    st.rerun()
+            elif run["status"] == "draft":
+                c1, c2, c3 = st.columns(3)
+                if c1.button("Kaydet (onayla)", type="primary"):
+                    storage.mark_saved(draft_id)
+                    out = excel_export.export_run(draft_id)
+                    st.success(f"Kaydedildi. Excel: {out}")
+                    _reset_draft()
+                    st.rerun()
+                if c2.button("Excel önizleme"):
+                    out = excel_export.export_run(draft_id)
+                    st.info(f"Excel yazıldı: {out}")
+                if c3.button("İptal et (sil)"):
+                    storage.delete_run(draft_id)
+                    _reset_draft()
+                    st.rerun()
 
 
 # =========================================================

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS violations (
     category TEXT,
     severity TEXT,
     threshold TEXT,
+    batch_no INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
@@ -72,6 +73,9 @@ def init_db() -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(runs)").fetchall()}
         if "finetune_model_id" not in cols:
             c.execute("ALTER TABLE runs ADD COLUMN finetune_model_id TEXT")
+        vcols = {r["name"] for r in c.execute("PRAGMA table_info(violations)").fetchall()}
+        if "batch_no" not in vcols:
+            c.execute("ALTER TABLE violations ADD COLUMN batch_no INTEGER NOT NULL DEFAULT 1")
 
 
 def now() -> str:
@@ -115,15 +119,27 @@ def create_run(
     return rid
 
 
-def add_violations(run_id: str, items: Iterable[dict]) -> int:
+def next_batch_no(run_id: str) -> int:
+    with _conn() as c:
+        r = c.execute(
+            "SELECT COALESCE(MAX(batch_no),0)+1 n FROM violations WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    return int(r["n"])
+
+
+def add_violations(run_id: str, items: Iterable[dict], batch_no: int | None = None) -> int:
     count = 0
     ts = now()
+    if batch_no is None:
+        batch_no = next_batch_no(run_id)
     with _conn() as c:
         for it in items:
             vid = str(uuid.uuid4())
             c.execute(
                 """INSERT INTO violations(id, run_id, title, description, category,
-                   severity, threshold, created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                   severity, threshold, batch_no, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
                 (
                     vid,
                     run_id,
@@ -132,6 +148,7 @@ def add_violations(run_id: str, items: Iterable[dict]) -> int:
                     it.get("category"),
                     it.get("severity"),
                     it.get("threshold"),
+                    batch_no,
                     ts,
                 ),
             )
@@ -161,6 +178,16 @@ def mark_saved(run_id: str) -> None:
 def delete_run(run_id: str) -> None:
     with _conn() as c:
         c.execute("DELETE FROM runs WHERE id=?", (run_id,))
+
+
+def delete_batch(run_id: str, batch_no: int) -> int:
+    with _conn() as c:
+        cur = c.execute(
+            "DELETE FROM violations WHERE run_id=? AND batch_no=?",
+            (run_id, batch_no),
+        )
+        c.execute("UPDATE runs SET updated_at=? WHERE id=?", (now(), run_id))
+        return cur.rowcount
 
 
 def list_runs(only_saved: bool = False) -> list[dict]:
