@@ -119,19 +119,42 @@ olarak inşa edilecek; sen yalnızca spec verirsin (IFC YAZMA).
     {"room": "string", "side": "south|north|east|west",
      "type": "door|window",
      "width": 1.0, "height": 2.2,
-     "sill": 0.0, "offset": 1.2}
+     "sill": 0.0, "offset": 1.2,
+     "is_exterior": true,           // dış cephede mi?
+     "name": "string"
+    }
   ]
 }
 
-KESİN KURALLAR:
-- Tüm odalar dikdörtgen ve birbiri ile çakışmasın.
-- 3 ile 6 oda arasında ver.
-- En az 1 kapı (ev girişi), en az 2 pencere ver.
-- Kapı: width >= 1.00 m, height >= 2.10 m, sill = 0.
-- Pencere: width >= 1.20 m, height >= 1.20 m, sill 0.6 - 1.2.
-- offset = duvar başlangıcından açıklığın başlangıcına mesafe (m); açıklık
+ZORUNLU İÇERİK:
+- En az şu odalar bulunsun: Salon, Mutfak, Banyo (veya WC) ve 1-3 Yatak Odası.
+  Opsiyonel: Koridor, Antre.
+- HER odanın en az 1 kapısı olsun (oda↔dış mekan veya oda↔başka oda).
+- TAM olarak 1 adet DIŞ KAPI (giriş) olsun ve is_exterior=true ile işaretlensin.
+  Bu kapı bina çeperinde, dışarıya açılan bir duvarda olsun (komşu oda yok).
+- HER odanın dışa bakan en az 1 duvarında pencere olsun (is_exterior=true).
+- Mutfak ve banyoda mutlaka en az 1 pencere olsun.
+- İç kapılar (oda↔oda arası) is_exterior=false.
+
+DIŞ DUVAR TESPİTİ (önemli):
+- Bir odanın bir kenarı (south/north/east/west) başka bir odanın kenarıyla
+  TEMAS ETMİYORSA o kenar DIŞ duvardır.
+- Önce odaları planla (origin+size çakışmasın, komşu odalar paylaşan
+  kenarlara hizalı olsun); sonra her odanın dış kenarlarını belirle;
+  pencereleri ve dış kapıyı yalnızca o kenarlara yerleştir.
+- İç kapıları, iki odanın paylaştığı kenara (her iki odadan biri için)
+  yerleştir; is_exterior=false.
+
+ÖLÇÜLER (bilinçli olarak fazlasıyla mevzuata uygun, ihlal İÇERMESİN):
+- Dış kapı: width >= 1.10 m, height >= 2.20 m, sill = 0.
+- İç kapı: width >= 1.00 m, height >= 2.10 m, sill = 0.
+- Pencere: width >= 1.20 m, height >= 1.20 m, sill 0.6 - 1.2 m.
+- offset = duvar başlangıcından açıklığın başlangıcına metre; açıklık
   duvar uzunluğunu aşmasın.
-- Tüm ölçüler bilinçli olarak mevzuata fazlasıyla uygun (ihlalsiz) olsun.
+
+KISITLAR:
+- Tüm odalar dikdörtgen; origin/size metre cinsinden, çakışmasın.
+- 3-6 oda arası ver.
 
 Cevap olarak SADECE JSON döndür, başka metin yazma."""
 

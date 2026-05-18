@@ -313,9 +313,11 @@ def build_house_ifc(spec: dict, out_path: str | Path) -> Path:
         cx = sx + dx * (offset + width / 2.0)
         cy = sy + dy * (offset + width / 2.0)
         cls = "IfcWindow" if op.get("type") == "window" else "IfcDoor"
+        tag = "[ext]" if op.get("is_exterior") else "[int]"
+        elem_name = op.get("name") or f"{cls[3:]}-{rname}-{side}"
         elem = _make_opening_element(
             f, owner, body_ctx, cls,
-            op.get("name", f"{cls[3:]}-{rname}-{side}"),
+            f"{elem_name} {tag}",
             (cx, cy), sill, dx, dy,
             width, height, panel_t=0.05, rel_to=st_pl,
         )
@@ -329,7 +331,12 @@ def build_house_ifc(spec: dict, out_path: str | Path) -> Path:
     return out_p
 
 
-# Varsayılan örnek spec (LLM cevap veremezse fallback)
+# Varsayılan örnek spec (LLM cevap veremezse fallback).
+# Plan (kuş bakışı, metre):
+#   Salon (0..5, 0..4) | Mutfak (5..8.5, 0..4)
+#   Yatak (0..4, 4..8) | Banyo  (4..7,   4..8)
+# Dış duvarlar: Salon-S/W, Mutfak-S/E/N(4..5'lik kısım dış değil ama parça
+# tutmadan kenar bütün olarak iç/dış sayıyoruz), Yatak-W/N, Banyo-N/E.
 EXAMPLE_SPEC = {
     "name": "Villa-Sample",
     "storey_height": 3.0,
@@ -341,13 +348,41 @@ EXAMPLE_SPEC = {
         {"name": "Banyo",       "origin": [4.0, 4.0], "size": [3.0, 4.0]},
     ],
     "openings": [
-        {"room": "Salon",       "side": "south", "type": "door",
-         "width": 1.10, "height": 2.20, "offset": 1.50},
-        {"room": "Mutfak",      "side": "east",  "type": "window",
-         "width": 1.50, "height": 1.50, "sill": 0.90, "offset": 1.00},
+        # Dış giriş kapısı (Salon güney cephesi)
+        {"room": "Salon", "side": "south", "type": "door",
+         "width": 1.10, "height": 2.20, "offset": 1.80,
+         "is_exterior": True, "name": "Giris Kapisi"},
+        # İç kapılar (her odaya bir tane)
+        {"room": "Salon", "side": "east", "type": "door",
+         "width": 1.00, "height": 2.10, "offset": 1.20,
+         "is_exterior": False, "name": "Salon-Mutfak"},
+        {"room": "Salon", "side": "north", "type": "door",
+         "width": 1.00, "height": 2.10, "offset": 0.50,
+         "is_exterior": False, "name": "Salon-YatakOdasi"},
+        {"room": "Mutfak", "side": "north", "type": "door",
+         "width": 1.00, "height": 2.10, "offset": 0.50,
+         "is_exterior": False, "name": "Mutfak-Banyo"},
+        # Dış cephe pencereleri
+        {"room": "Salon", "side": "west", "type": "window",
+         "width": 1.50, "height": 1.50, "sill": 0.90, "offset": 1.00,
+         "is_exterior": True},
+        {"room": "Mutfak", "side": "east", "type": "window",
+         "width": 1.50, "height": 1.50, "sill": 0.90, "offset": 1.00,
+         "is_exterior": True},
+        {"room": "Mutfak", "side": "south", "type": "window",
+         "width": 1.20, "height": 1.20, "sill": 0.90, "offset": 1.00,
+         "is_exterior": True},
         {"room": "Yatak Odasi", "side": "north", "type": "window",
-         "width": 1.50, "height": 1.50, "sill": 0.90, "offset": 1.00},
-        {"room": "Banyo",       "side": "east",  "type": "window",
-         "width": 1.30, "height": 1.20, "sill": 1.20, "offset": 0.80},
+         "width": 1.50, "height": 1.50, "sill": 0.90, "offset": 1.00,
+         "is_exterior": True},
+        {"room": "Yatak Odasi", "side": "west", "type": "window",
+         "width": 1.20, "height": 1.20, "sill": 0.90, "offset": 1.20,
+         "is_exterior": True},
+        {"room": "Banyo", "side": "north", "type": "window",
+         "width": 1.20, "height": 1.20, "sill": 1.20, "offset": 1.00,
+         "is_exterior": True},
+        {"room": "Banyo", "side": "east", "type": "window",
+         "width": 1.20, "height": 1.20, "sill": 1.20, "offset": 1.00,
+         "is_exterior": True},
     ],
 }
