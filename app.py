@@ -895,13 +895,36 @@ with top_ifc:
             if kind == "violated":
                 labs = storage.get_ifc_labels(sel)
                 if labs:
+                    import json as _json
+                    def _ev_short(ev_json: str | None) -> str:
+                        try:
+                            evs = _json.loads(ev_json or "[]") or []
+                        except Exception:
+                            evs = []
+                        if not evs:
+                            return ""
+                        parts = []
+                        for e in evs[:3]:
+                            d = (e or {}).get("document") or "?"
+                            p = (e or {}).get("page")
+                            c = (e or {}).get("clause")
+                            t = f"{d}"
+                            if p is not None: t += f":p{p}"
+                            if c: t += f" §{c}"
+                            parts.append(t)
+                        if len(evs) > 3:
+                            parts.append(f"(+{len(evs)-3})")
+                        return "; ".join(parts)
+
                     ldf = pd.DataFrame([{
+                        "violation_code": (l.get("violation_id") or "")[:8],
                         "is_decoy": bool(l.get("is_decoy")),
                         "action": l.get("action"),
                         "status": l["status"],
                         "title": l["title"],
                         "category": l["category"],
                         "severity": l["severity"],
+                        "evidence": _ev_short(l.get("evidence_json")),
                         "ifc_type": l["ifc_type"],
                         "ifc_name": l["ifc_name"],
                         "attribute": l["attribute"],
@@ -916,6 +939,38 @@ with top_ifc:
                         f"decoy: **{n_dec}**"
                     )
                     st.dataframe(ldf, use_container_width=True)
+                    if st.button("Etiketleri Excel'e indir",
+                                 key=f"lab_xls_{sel}"):
+                        out = excel_export.export_ifc_labels(sel)
+                        st.success(f"Yazıldı: {out}")
+
+                    # Detay: bir label için tam kanıt zinciri
+                    with st.expander("Bir etiket için tam kanıt zinciri",
+                                     expanded=False):
+                        opts2 = {l["id"]: f"{(l.get('title') or l.get('description') or l['id'])[:80]}"
+                                          + (" [decoy]" if l.get("is_decoy") else "")
+                                 for l in labs}
+                        ls = st.selectbox("Etiket", list(opts2.keys()),
+                                          format_func=lambda k: opts2[k],
+                                          key=f"lab_pick_{sel}")
+                        lab = next((x for x in labs if x["id"] == ls), None)
+                        if lab:
+                            try:
+                                evs = _json.loads(lab.get("evidence_json") or "[]")
+                            except Exception:
+                                evs = []
+                            st.json({
+                                "violation_id (havuz kodu)": lab.get("violation_id"),
+                                "title": lab.get("title"),
+                                "category": lab.get("category"),
+                                "severity": lab.get("severity"),
+                                "threshold": lab.get("threshold"),
+                                "ifc_global_id": lab.get("ifc_global_id"),
+                                "action": lab.get("action"),
+                                "is_decoy": bool(lab.get("is_decoy")),
+                                "evidence": evs,
+                                "reason": lab.get("reason"),
+                            })
 
             # ---- Görselleştirme: 3D IFC ve Graph ----
             hl_guids = set()

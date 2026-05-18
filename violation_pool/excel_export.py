@@ -1,6 +1,7 @@
-"""Excel export for violation pools."""
+"""Excel export for violation pools and IFC labels."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -14,7 +15,6 @@ def export_run(run_id: str) -> Path:
     if not run:
         raise ValueError(f"Run bulunamadı: {run_id}")
     violations = storage.get_violations(run_id)
-
     prompt_short = (run["prompt"] or "")[:120].replace("\n", " ")
     v_rows = []
     e_rows = []
@@ -72,4 +72,73 @@ def export_run(run_id: str) -> Path:
         pd.DataFrame(v_rows).to_excel(w, index=False, sheet_name="violations")
         pd.DataFrame(e_rows).to_excel(w, index=False, sheet_name="evidence")
         pd.DataFrame(meta_rows).to_excel(w, index=False, sheet_name="run_meta")
+    return out
+
+
+def export_ifc_labels(ifc_model_id: str) -> Path:
+    """Bir violated/imported IFC için etiketleri (her ihlal + tüm kanıtları
+    ile) Excel olarak indir. Her kanıt satırı ayrı bir row; etiketin
+    ihlal_id'si linklenmiş kalır.
+    """
+    m = storage.get_ifc_model(ifc_model_id)
+    if not m:
+        raise ValueError(f"IFC bulunamadı: {ifc_model_id}")
+    labels = storage.get_ifc_labels(ifc_model_id)
+
+    label_rows = []
+    evidence_rows = []
+    for l in labels:
+        label_rows.append({
+            "label_id": l["id"],
+            "violation_id": l.get("violation_id"),   # havuzdaki ihlal kodu
+            "is_decoy": bool(l.get("is_decoy")),
+            "action": l.get("action"),
+            "status": l["status"],
+            "title": l["title"],
+            "category": l["category"],
+            "severity": l["severity"],
+            "threshold": l["threshold"],
+            "ifc_global_id": l["ifc_global_id"],
+            "ifc_type": l["ifc_type"],
+            "ifc_name": l["ifc_name"],
+            "attribute": l["attribute"],
+            "value_before": l["value_before"],
+            "value_after": l["value_after"],
+            "reason": l["reason"],
+            "applied_at": l["applied_at"],
+        })
+        try:
+            evs = json.loads(l.get("evidence_json") or "[]")
+        except Exception:
+            evs = []
+        for ev in (evs or []):
+            evidence_rows.append({
+                "label_id": l["id"],
+                "violation_id": l.get("violation_id"),
+                "ifc_global_id": l["ifc_global_id"],
+                "document": (ev or {}).get("document"),
+                "page": (ev or {}).get("page"),
+                "clause": (ev or {}).get("clause"),
+                "snippet": (ev or {}).get("snippet"),
+            })
+
+    meta_rows = [
+        {"key": "ifc_model_id", "value": m["id"]},
+        {"key": "name", "value": m["name"]},
+        {"key": "kind", "value": m["kind"]},
+        {"key": "parent_id", "value": m.get("parent_id")},
+        {"key": "pool_run_id", "value": m.get("pool_run_id")},
+        {"key": "llm_model", "value": m["llm_model"]},
+        {"key": "status", "value": m["status"]},
+        {"key": "file_path", "value": m["file_path"]},
+        {"key": "labels_path", "value": m.get("labels_path")},
+        {"key": "graph_path", "value": m.get("graph_path")},
+        {"key": "created_at", "value": m["created_at"]},
+    ]
+
+    out = settings.export_dir / f"ifc_labels_{m['name']}_{m['id'][:8]}.xlsx"
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        pd.DataFrame(label_rows).to_excel(w, index=False, sheet_name="labels")
+        pd.DataFrame(evidence_rows).to_excel(w, index=False, sheet_name="evidence")
+        pd.DataFrame(meta_rows).to_excel(w, index=False, sheet_name="ifc_meta")
     return out
