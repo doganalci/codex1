@@ -64,6 +64,12 @@ streamlit run app.py
    - `<id>.meta.json` (zaman, LLM, havuz id, özet)
 3. **Görüntüle** — Üretilmiş IFC'leri listele, `.ifc`/`.labels.json`/`.meta.json`
    indir, label tablosunu gör.
+4. **3D görselleştirme** — Görüntüle sekmesindeki "3D görselleştir" expander'ı
+   `ifcopenshell.geom` ile tessellate edip plotly Mesh3d olarak çizer.
+   `violated` IFC'lerde, ihlal edilen elemanların GUID'leri etiket tablosundan
+   bulunup kırmızı vurgulanır. Geometry kernel kullanılamıyorsa
+   (`ifcopenshell.geom` yoksa) açıklayıcı hata verir — bu durumda
+   `conda install -c conda-forge ifcopenshell`.
 
 ## Saklanan veriler
 

@@ -15,7 +15,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from violation_pool import excel_export, finetune, ifc_gen, ifc_inject, llm, rag, storage
+from violation_pool import (
+    excel_export, finetune, ifc_gen, ifc_inject, ifc_viewer, llm, rag, storage,
+)
 from violation_pool.config import (
     METHOD_FINETUNE,
     METHOD_LABELS,
@@ -646,6 +648,7 @@ with top_ifc:
                     cols[2].download_button("Meta JSON indir", f,
                                             file_name=Path(m["meta_path"]).name)
 
+            labs: list[dict] = []
             if kind == "violated":
                 labs = storage.get_ifc_labels(sel)
                 if labs:
@@ -663,6 +666,37 @@ with top_ifc:
                     } for l in labs])
                     st.markdown("**İhlal etiketleri**")
                     st.dataframe(ldf, use_container_width=True)
+
+            # ---- 3D görselleştirme ----
+            with st.expander("3D görselleştir", expanded=False):
+                vc1, vc2 = st.columns([1, 3])
+                max_el = vc1.number_input(
+                    "Maks. eleman", 100, 20000, 5000, step=100, key=f"max_el_{sel}",
+                )
+                highlight = vc2.checkbox(
+                    "İhlal edilen elemanları kırmızı vurgula",
+                    value=True, key=f"hl_{sel}", disabled=(kind != "violated"),
+                )
+                if st.button("Çiz", key=f"draw_{sel}"):
+                    hl_guids = (
+                        {l["ifc_global_id"] for l in labs
+                         if l.get("status") == "applied" and l.get("ifc_global_id")}
+                        if highlight and kind == "violated" else set()
+                    )
+                    try:
+                        with st.spinner("Geometri tessellate ediliyor..."):
+                            fig, stats = ifc_viewer.ifc_to_figure(
+                                m["file_path"],
+                                highlight_guids=hl_guids,
+                                max_elements=int(max_el),
+                            )
+                        st.caption(
+                            f"Çizilen eleman: {stats['drawn']}  ·  atlanan: {stats['skipped']}"
+                            + (f"  ·  vurgulanan: {len(hl_guids)}" if hl_guids else "")
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Görselleştirme hatası: {e}")
 
             if st.button("Bu kaydı sil", key=f"del_ifc_{sel}"):
                 storage.delete_ifc_model(sel)
