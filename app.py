@@ -777,27 +777,41 @@ with top_ifc:
                 for v in filtered
             }
 
-            # Hızlı seçim
+            # ---- Toplu seçim (tek state: inj_sel_widget) ----
+            # Filtre değiştiğinde stale id'leri temizle
+            cur_sel = st.session_state.get("inj_sel_widget", [])
+            cur_sel = [i for i in cur_sel if i in opt]
+            st.session_state["inj_sel_widget"] = cur_sel
+
             qc1, qc2, qc3, qc4 = st.columns(4)
-            if qc1.button("Tümünü seç"):
-                st.session_state["inj_sel"] = list(opt.keys())
-            n_rand = qc2.number_input("Rastgele N", 1,
-                                      max(1, len(filtered)),
-                                      min(10, max(1, len(filtered))),
-                                      key="inj_rand_n")
+            if qc1.button("Tümünü seç", key="inj_btn_all"):
+                st.session_state["inj_sel_widget"] = list(opt.keys())
+                st.rerun()
+            n_rand = qc2.number_input(
+                "Rastgele N", 1, max(1, len(filtered)),
+                min(10, max(1, len(filtered))),
+                key="inj_rand_n",
+            )
             r_seed = qc3.number_input("Tohum", 0, 10_000, 42, key="inj_rand_seed")
-            if qc4.button("Rastgele N seç"):
+            if qc4.button("Rastgele N seç", key="inj_btn_rand"):
                 import random as _r
                 _r.seed(int(r_seed))
                 pool_ids = list(opt.keys())
-                st.session_state["inj_sel"] = _r.sample(
+                st.session_state["inj_sel_widget"] = _r.sample(
                     pool_ids, min(int(n_rand), len(pool_ids))
                 )
+                st.rerun()
+            qc5, qc6 = st.columns(2)
+            if qc5.button("Seçimi temizle", key="inj_btn_clear"):
+                st.session_state["inj_sel_widget"] = []
+                st.rerun()
+            if qc6.button("Filtreyle eşleşen ilk N", key="inj_btn_topn"):
+                st.session_state["inj_sel_widget"] = list(opt.keys())[: int(n_rand)]
+                st.rerun()
 
             selected_ids = st.multiselect(
-                "Enjekte edilecek ihlaller",
+                "Enjekte edilecek ihlaller (toplu seçim)",
                 list(opt.keys()),
-                default=st.session_state.get("inj_sel", []),
                 format_func=lambda i: opt.get(i, i),
                 key="inj_sel_widget",
             )
@@ -824,7 +838,10 @@ with top_ifc:
                          disabled=not (sel_base and selected_ids)):
                 try:
                     picked = [v for v in pool_vs if v["id"] in selected_ids]
-                    with st.spinner(f"{len(picked)} ihlal + decoy ekleniyor..."):
+                    with st.spinner(
+                        f"{len(picked)} ihlal sırayla deneniyor "
+                        "(her biri için ayrı LLM çağrısı)..."
+                    ):
                         out = ifc_inject.inject_violations(
                             baseline_id=sel_base, violations=picked,
                             pool_run_id=sel_pool,
