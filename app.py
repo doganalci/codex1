@@ -609,26 +609,48 @@ with top_ifc:
         )
         c1, c2 = st.columns([2, 1])
         bn_prefix = c1.text_input("İsim öneki", value="House")
-        bn_count = c2.number_input("Adet", 1, 20, 4)
+        bn_count = c2.number_input("Adet", 1, 20, 1)
         bn_model = st.text_input("IFC LLM modeli", value=settings.ifc_llm_model)
         bn_prompt = st.text_area(
-            "Promt (baseline)",
+            "Genel promt (her IFC'ye uygulanır)",
             value=(
-                "Küçük, tek aileli bir konut için 3-6 odalı, en az 1 kapı ve "
-                "2 pencereli mevzuata fazlasıyla uygun bir spec üret."
+                "Erişilebilirlik ve kullanılabilirlik açısından sorunsuz, "
+                "mevzuata fazlasıyla uygun (ihlalsiz) küçük bir konut spec'i üret."
                 if mode == "parametric"
                 else "Tek aileli, küçük bir konutun tam IFC4 dosyasını üret. "
                 "Tüm boyutlar mevzuata fazlasıyla uygun (ihlalsiz) olsun."
             ),
-            height=120,
+            height=80,
         )
+
+        vary = st.checkbox(
+            "Her IFC için farklı program tipi enjekte et (önerilen)",
+            value=True,
+        )
+        if vary:
+            with st.expander("Program tipleri (her satır = bir varyasyon)",
+                             expanded=False):
+                default_text = "\n".join(ifc_gen.DEFAULT_VARIATIONS)
+                vtext = st.text_area(
+                    "Varyasyonlar", value=default_text, height=260,
+                    key="bn_variations",
+                )
+                variations = [v.strip() for v in vtext.split("\n") if v.strip()]
+            st.caption(
+                f"{len(variations)} varyasyon · {bn_count} IFC üretilecek "
+                f"(adet > varyasyon ise döngüsel kullanılır)."
+            )
+        else:
+            variations = None
+            st.caption("Tüm IFC'ler aynı promtla üretilir.")
+
         if st.button("Baseline IFC'leri üret", type="primary"):
             with st.spinner(f"{bn_count} adet baseline üretiliyor..."):
                 try:
                     res = ifc_gen.generate_baselines(
                         n=int(bn_count), seed_prompt=bn_prompt,
                         model=bn_model.strip() or None, name_prefix=bn_prefix,
-                        mode=mode,
+                        mode=mode, variations=variations, vary=vary,
                     )
                     df = pd.DataFrame([{
                         "id": r["ifc_model_id"][:8],

@@ -103,6 +103,39 @@ def _ask_llm(user_prompt: str, model: str, retry_error: str | None = None,
     return _strip_fences(resp.choices[0].message.content or "")
 
 
+DEFAULT_VARIATIONS = [
+    "Stüdyo daire: 1 yaşam alanı salon+mutfak birleşik (4.5x5m), "
+    "1 yatak nişi (3x3m), 1 banyo (2x2m). Toplam 3-4 oda.",
+
+    "1+1 daire: 1 salon (4x4m), 1 yatak odası (3.5x3m), 1 mutfak ayrı (3x2.5m), "
+    "1 banyo (2.5x2m), 1 antre.",
+
+    "2+1 daire: 1 salon (5x4m), 2 yatak odası (3.5x3m), 1 mutfak (3x3m), "
+    "1 banyo (2.5x2m), 1 wc (1.5x1.5m).",
+
+    "3+1 daire: 1 salon (6x4m), 3 yatak odası (3.5x3m), 1 mutfak (3.5x3m), "
+    "1 banyo (3x2m), 1 wc (1.5x1.5m), 1 balkon (3x1.5m).",
+
+    "L şeklinde villa: 1 salon (6x5m), 1 mutfak ayrı (4x3m), 1 yemek odası (4x3m), "
+    "1 yatak odası (4x3.5m), 1 banyo (3x2.5m). Plan L formunda.",
+
+    "Dar-uzun plan: 1 salon (4x6m), 1 mutfak (3x3m), 1 yatak odası (3x4m), "
+    "1 banyo (2x3m); odalar bir koridor etrafında.",
+
+    "Geniş villa: 1 salon (7x5m), 1 mutfak (4x4m), 1 yemek odası (5x4m), "
+    "2 yatak odası (4x4m), 2 banyo, 1 teras (4x2m).",
+
+    "Ofis-ev: 1 salon (4x4m), 1 çalışma odası (3.5x3m), 1 mutfak (3x2.5m), "
+    "1 yatak (3.5x3m), 1 banyo (2.5x2m).",
+
+    "Bahçe katı: 1 salon (5x4m), 1 açık mutfak (4x3m), 1 yatak (3.5x3m), "
+    "1 banyo (2.5x2m), 1 veranda (4x2m).",
+
+    "Asimetrik plan: 1 salon büyük (6x5m), 1 mutfak ayrı (3x3m), "
+    "2 yatak odası farklı boyutta (3.5x3m ve 3x3m), 1 banyo + 1 wc.",
+]
+
+
 IFC_SPEC_PROMPT = """Sen bir mimar yardımcısısın. Sözel isteğe karşılık,
 PARAMETRİK bir konut için JSON spec döndürürsün. Geometri programatik
 olarak inşa edilecek; sen yalnızca spec verirsin (IFC YAZMA).
@@ -191,6 +224,7 @@ def generate_baseline(
     seed_prompt: str,
     model: str | None = None,
     mode: str = "parametric",  # "parametric" | "raw"
+    variation_brief: str | None = None,
 ) -> dict:
     """Tek bir baseline IFC üret.
 
@@ -212,9 +246,19 @@ def generate_baseline(
     err: str | None = None
     spec: dict | None = None
 
+    full_prompt = seed_prompt
+    if variation_brief:
+        full_prompt = (
+            seed_prompt.rstrip()
+            + "\n\n## Bu üretim için tasarım programı\n"
+            + variation_brief
+            + "\nBu programa SADIK kal; oda sayısı, isimleri ve yaklaşık "
+              "boyutları bu programa uy."
+        )
+
     if mode == "parametric":
         try:
-            spec = _ask_llm_spec(seed_prompt, model, ifc_model_id=ifc_id, note=name)
+            spec = _ask_llm_spec(full_prompt, model, ifc_model_id=ifc_id, note=name)
             if not spec or not spec.get("rooms"):
                 spec = ifc_template.EXAMPLE_SPEC
                 err = "LLM spec boş/eksik; fallback örnek spec kullanıldı"
@@ -235,11 +279,11 @@ def generate_baseline(
                 err = f"parametrik üretim başarısız: {e2}"
     else:
         # Eski "raw" yol — LLM tam IFC text yazsın
-        text = _ask_llm(seed_prompt, model, note=name, ifc_model_id=ifc_id)
+        text = _ask_llm(full_prompt, model, note=name, ifc_model_id=ifc_id)
         ifc_path.write_text(text, encoding="utf-8")
         ok, err = _try_open(ifc_path)
         if not ok:
-            text2 = _ask_llm(seed_prompt, model, retry_error=err, note=name,
+            text2 = _ask_llm(full_prompt, model, retry_error=err, note=name,
                               ifc_model_id=ifc_id)
             ifc_path.write_text(text2, encoding="utf-8")
             ok, err = _try_open(ifc_path)
@@ -252,6 +296,7 @@ def generate_baseline(
         "mode": mode,
         "llm_model": model,
         "prompt": seed_prompt,
+        "variation_brief": variation_brief,
         "spec": spec,
         "status": status,
         "error": err,
@@ -274,7 +319,8 @@ def generate_baseline(
         id=ifc_id,
         kind="baseline", name=name, parent_id=None,
         llm_model=model, prompt=seed_prompt, pool_run_id=None,
-        params={"mode": mode, "spec": spec},
+        params={"mode": mode, "spec": spec,
+                "variation_brief": variation_brief},
         file_path=str(ifc_path), meta_path=str(meta_path),
         labels_path=None, graph_path=graph_path,
         status=status, error=err,
@@ -351,25 +397,23 @@ def generate_baselines(
     *, n: int, seed_prompt: str, model: str | None = None,
     name_prefix: str = "House",
     mode: str = "parametric",
+    variations: list[str] | None = None,
+    vary: bool = True,
 ) -> list[dict]:
-    """N adet farklı baseline IFC üret. Çeşitlilik için her birine küçük bir
-    varyasyon ipucu eklenir."""
+    """N adet baseline IFC üret.
+
+    vary=True (varsayılan): her IFC için varyasyon listesinden farklı bir
+    program tipi enjekte edilir (default: DEFAULT_VARIATIONS). Liste n'den
+    kısaysa cyclic dolaşılır.
+    vary=False: tüm IFC'ler aynı promtla (varyasyon yok) üretilir — LLM
+    çeşitliliği test etmek için.
+    """
+    pool = variations if variations is not None else DEFAULT_VARIATIONS
     results = []
-    variations = [
-        "tek katlı, dikdörtgen plan, 3 oda + salon",
-        "tek katlı, L şeklinde plan, 2 oda + salon + mutfak",
-        "iki katlı, kare plan, alt kat salon+mutfak, üst kat 2 yatak odası",
-        "tek katlı geniş plan, 4 oda + salon + 2 banyo",
-        "iki katlı, dikdörtgen, üst katta balkon",
-    ]
     for i in range(n):
-        var = variations[i % len(variations)]
-        prompt = (
-            seed_prompt
-            + f"\n\nBu örnek için varyasyon: {var}. Boyutlar yine cömert (ihlalsiz) olsun."
-        )
+        brief = pool[i % len(pool)] if (vary and pool) else None
         results.append(generate_baseline(
-            name=f"{name_prefix}-{i+1:02d}", seed_prompt=prompt,
-            model=model, mode=mode,
+            name=f"{name_prefix}-{i+1:02d}", seed_prompt=seed_prompt,
+            model=model, mode=mode, variation_brief=brief,
         ))
     return results
