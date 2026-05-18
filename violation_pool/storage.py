@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS ifc_violation_labels (
     evidence_json TEXT,
     status TEXT NOT NULL,           -- 'applied' | 'skipped' | 'decoy'
     is_decoy INTEGER NOT NULL DEFAULT 0,
+    action TEXT NOT NULL DEFAULT 'modify_attribute',
     reason TEXT,
     applied_at TEXT NOT NULL,
     FOREIGN KEY(ifc_model_id) REFERENCES ifc_models(id) ON DELETE CASCADE
@@ -136,6 +137,11 @@ def init_db() -> None:
         lcols = {r["name"] for r in c.execute("PRAGMA table_info(ifc_violation_labels)").fetchall()}
         if lcols and "is_decoy" not in lcols:
             c.execute("ALTER TABLE ifc_violation_labels ADD COLUMN is_decoy INTEGER NOT NULL DEFAULT 0")
+        if lcols and "action" not in lcols:
+            c.execute(
+                "ALTER TABLE ifc_violation_labels ADD COLUMN action TEXT "
+                "NOT NULL DEFAULT 'modify_attribute'"
+            )
 
 
 def now() -> str:
@@ -361,8 +367,8 @@ def add_ifc_labels(ifc_model_id: str, labels: Iterable[dict]) -> int:
                 """INSERT INTO ifc_violation_labels(id, ifc_model_id, violation_id,
                    title, category, severity, threshold, ifc_global_id, ifc_type,
                    ifc_name, attribute, value_before, value_after, evidence_json,
-                   status, is_decoy, reason, applied_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   status, is_decoy, action, reason, applied_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     str(uuid.uuid4()), ifc_model_id, lab.get("violation_id"),
                     lab.get("title"), lab.get("category"), lab.get("severity"),
@@ -374,6 +380,7 @@ def add_ifc_labels(ifc_model_id: str, labels: Iterable[dict]) -> int:
                     json.dumps(lab.get("evidence") or [], ensure_ascii=False),
                     lab.get("status", "applied"),
                     1 if lab.get("is_decoy") else 0,
+                    lab.get("action") or "modify_attribute",
                     lab.get("reason"), ts,
                 ),
             )

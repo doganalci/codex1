@@ -905,6 +905,7 @@ with top_ifc:
                 if labs:
                     ldf = pd.DataFrame([{
                         "is_decoy": bool(l.get("is_decoy")),
+                        "action": l.get("action"),
                         "status": l["status"],
                         "title": l["title"],
                         "category": l["category"],

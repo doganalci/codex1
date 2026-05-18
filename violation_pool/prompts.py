@@ -32,6 +32,15 @@ Kurallar:
   genişliğinin 90 cm'den küçük olması").
 - Sayısal eşik varsa birimiyle birlikte ver (cm, m, %, lux, vb.).
 - Belirsiz ifadelerden ("uygun olmayan", "yeterli olmayan") kaçın.
+- **İHLAL TÜRLERİ** — sadece "eşikten küçük/büyük" değil, FİZİKSEL ENGEL
+  oluşturan durumları da üret. Örnekler:
+   * "Kapı net geçiş genişliğinin 90 cm'den küçük olması" (boyut ihlali)
+   * "Kapı önünde 150 cm × 150 cm manevra alanı bulunmaması" (manevra eksiği)
+   * "Koridorda engel (kolon, sabit obje) nedeniyle net genişliğin 110 cm'nin
+     altına düşmesi" (sabit engel)
+   * "Erişilebilir tuvalette dönme yarıçapı 150 cm'lik dairenin yer almaması"
+   * "Rampa eğiminin %8'i aşması" (eğim)
+   * "Asansör kabin iç boyutunun 110 × 140 cm'den küçük olması"
 - Her ihlal için kategori belirt; şu setten seç:
   "Yaya erişimi" | "Giriş" | "Kapı/Koridor" | "Rampa" | "Merdiven" |
   "Korkuluk/Küpeşte" | "Asansör" | "Tuvalet/Banyo" | "Mutfak" |

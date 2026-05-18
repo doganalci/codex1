@@ -24,27 +24,55 @@ from .config import settings
 
 
 INJECT_SYSTEM_PROMPT = """Sen bir BIM denetim aracısın. Sana bir IFC eleman
-katalogu ve bir 'ihlal kuralı' verilir. Görevin: katalogdan EN UYGUN tek bir
-hedef eleman seç ve hangi sayısal/string attribute'u hangi yeni değere
-çekersen bu ihlali oluşturacağını söyle.
+katalogu ve bir 'ihlal kuralı' verilir. Görevin, ihlali oluşturacak EN UYGUN
+tek bir EYLEM önermek.
 
-Kurallar:
-- Sadece geçerli IFC attribute adı kullan (örn. OverallWidth, OverallHeight,
-  Elevation, NominalHeight).
-- new_value gerçekçi ve ihlali gerçekleştirecek seviyede olsun
-  (örn. 'Kapı genişliği < 70 cm' → OverallWidth = 0.60).
-- Uygulanabilir hedef yoksa applicable=false döndür ve reason yaz.
+İKİ EYLEM TÜRÜ VAR:
 
-Çıktıyı SADECE şu JSON ile döndür:
-{
-  "applicable": true|false,
-  "target_guid": "GUID",
-  "ifc_type": "IfcDoor",
-  "attribute": "OverallWidth",
-  "new_value": 0.60,
-  "rationale": "kısa açıklama",
-  "reason": null
-}"""
+A) modify_attribute — Mevcut bir elemanın bir attribute'unu değiştir.
+   (Örn: kapı genişliğini 70 cm'in altına indir.)
+   Çıktı şeması:
+   {
+     "applicable": true,
+     "action": "modify_attribute",
+     "target_guid": "GUID",
+     "ifc_type": "IfcDoor",
+     "attribute": "OverallWidth",
+     "new_value": 0.60,
+     "rationale": "kısa açıklama"
+   }
+
+B) add_obstruction — Yeni bir IfcColumn (engel) ekleyerek geçişi/manevrayı
+   engelle. Hedef elemanın (kapı / koridor / merdiven) önüne ya da içine
+   bir kolon yerleştirilir. Eleman boyutu standartı sağlıyor olabilir ama
+   kolon yüzünden işlevsel olarak ihlal oluşur.
+   Çıktı şeması:
+   {
+     "applicable": true,
+     "action": "add_obstruction",
+     "reference_guid": "GUID",       // yanına/önüne konulacak eleman
+     "ifc_type": "IfcDoor|IfcSpace|IfcStair|IfcWall",
+     "obstruction_size": [0.30, 0.30, 2.50],  // x, y, z (m)
+     "offset": 0.50,                  // referans elemandan mesafe (m)
+     "rationale": "kısa açıklama"
+   }
+
+İHLAL TÜRÜNDEN EYLEM SEÇİMİ:
+- "Kapı genişliği < X cm"             → modify_attribute (OverallWidth)
+- "Kapı yüksekliği < X cm"            → modify_attribute (OverallHeight)
+- "Tavan yüksekliği < X cm"           → modify_attribute (NominalHeight)
+- "Pencere boyutu < X"                → modify_attribute
+- "Asansör kabin boyutu < X"          → modify_attribute
+- "Kapı önünde manevra alanı yetersiz" → add_obstruction (referans: kapı)
+- "Koridorda engel/kolon"              → add_obstruction (referans: koridor/space)
+- "Geçiş alanında sabit obje"          → add_obstruction (referans: kapı/space)
+- "Merdiven başında engel"             → add_obstruction (referans: merdiven)
+- "Rampa önünde engel"                 → add_obstruction (referans: rampa)
+
+UYGULANAMAZSA:
+{"applicable": false, "reason": "kısa neden"}
+
+Sadece JSON döndür, başka hiçbir metin yazma."""
 
 
 def _client() -> OpenAI:
@@ -139,6 +167,163 @@ def _apply_edit(ifc_file, guid: str, attribute: str, new_value):
     return before, new_value
 
 
+# ----- Obstruction (kolon) ekleme -----
+def _world_xy_of(element) -> tuple[float, float]:
+    """IfcProduct'ın yaklaşık world XY konumu (placement zinciri toplanır)."""
+    x = y = 0.0
+    placement = getattr(element, "ObjectPlacement", None)
+    while placement is not None:
+        rel = getattr(placement, "RelativePlacement", None)
+        if rel is not None:
+            loc = getattr(rel, "Location", None)
+            if loc is not None and getattr(loc, "Coordinates", None):
+                cc = loc.Coordinates
+                x += cc[0] if len(cc) > 0 else 0.0
+                y += cc[1] if len(cc) > 1 else 0.0
+        placement = getattr(placement, "PlacementRelTo", None)
+    return float(x), float(y)
+
+
+def _ref_dir_xy_of(element) -> tuple[float, float]:
+    placement = getattr(element, "ObjectPlacement", None)
+    if not placement:
+        return (1.0, 0.0)
+    rel = getattr(placement, "RelativePlacement", None)
+    if not rel:
+        return (1.0, 0.0)
+    ref = getattr(rel, "RefDirection", None)
+    if not ref:
+        return (1.0, 0.0)
+    r = ref.DirectionRatios
+    dx = r[0] if len(r) > 0 else 1.0
+    dy = r[1] if len(r) > 1 else 0.0
+    n = (dx * dx + dy * dy) ** 0.5 or 1.0
+    return (dx / n, dy / n)
+
+
+def _get_context(ifc_file):
+    """Mevcut IFC dosyasından owner/body_ctx/storey objelerini topla."""
+    import ifcopenshell  # noqa
+    owners = ifc_file.by_type("IfcOwnerHistory")
+    storeys = ifc_file.by_type("IfcBuildingStorey")
+    sub = [c for c in ifc_file.by_type("IfcGeometricRepresentationSubContext")
+           if getattr(c, "ContextIdentifier", "") == "Body"]
+    if not sub:
+        sub = ifc_file.by_type("IfcGeometricRepresentationContext")
+    if not (owners and storeys and sub):
+        return None, None, None
+    return owners[0], sub[0], storeys[0]
+
+
+def _add_column_obstruction(
+    ifc_file, owner, body_ctx, storey,
+    world_x: float, world_y: float,
+    size_x: float = 0.30, size_y: float = 0.30, height: float = 2.50,
+    name: str = "Obstruction Column",
+):
+    """world (x,y) konumuna IfcColumn ekler; storey'e contain edilir."""
+    import ifcopenshell.guid as _gid
+
+    def _pt(x, y, z=0.0):
+        return ifc_file.create_entity("IfcCartesianPoint",
+                                      Coordinates=(float(x), float(y), float(z)))
+
+    def _dir(x, y, z):
+        return ifc_file.create_entity("IfcDirection",
+                                      DirectionRatios=(float(x), float(y), float(z)))
+
+    def _axis(loc, z=(0, 0, 1), x=(1, 0, 0)):
+        return ifc_file.create_entity("IfcAxis2Placement3D",
+                                      Location=loc,
+                                      Axis=_dir(*z),
+                                      RefDirection=_dir(*x))
+
+    placement = ifc_file.create_entity(
+        "IfcLocalPlacement",
+        PlacementRelTo=storey.ObjectPlacement,
+        RelativePlacement=_axis(_pt(world_x, world_y, 0.0)),
+    )
+    profile = ifc_file.create_entity(
+        "IfcRectangleProfileDef",
+        ProfileType="AREA", XDim=float(size_x), YDim=float(size_y),
+    )
+    extrude_axis = _axis(_pt(0, 0, 0))
+    solid = ifc_file.create_entity(
+        "IfcExtrudedAreaSolid",
+        SweptArea=profile, Position=extrude_axis,
+        ExtrudedDirection=_dir(0, 0, 1), Depth=float(height),
+    )
+    rep = ifc_file.create_entity(
+        "IfcShapeRepresentation",
+        ContextOfItems=body_ctx,
+        RepresentationIdentifier="Body",
+        RepresentationType="SweptSolid",
+        Items=[solid],
+    )
+    shape = ifc_file.create_entity("IfcProductDefinitionShape",
+                                   Representations=[rep])
+    column = ifc_file.create_entity(
+        "IfcColumn",
+        GlobalId=_gid.new(), OwnerHistory=owner, Name=name,
+        ObjectPlacement=placement, Representation=shape,
+    )
+    # Storey'e contain et (varsa mevcut Rel'e ekle, yoksa yeni Rel yarat)
+    contained = False
+    for r in ifc_file.by_type("IfcRelContainedInSpatialStructure"):
+        if r.RelatingStructure == storey:
+            related = list(r.RelatedElements or ())
+            related.append(column)
+            r.RelatedElements = tuple(related)
+            contained = True
+            break
+    if not contained:
+        ifc_file.create_entity(
+            "IfcRelContainedInSpatialStructure",
+            GlobalId=_gid.new(), OwnerHistory=owner,
+            RelatingStructure=storey, RelatedElements=[column],
+        )
+    return column
+
+
+def _apply_add_obstruction(ifc_file, sug: dict) -> dict:
+    """sug: add_obstruction önerisi. Yeni kolon ekler ve label bilgisini döner."""
+    owner, body_ctx, storey = _get_context(ifc_file)
+    if not (owner and body_ctx and storey):
+        raise ValueError("IFC bağlam objeleri eksik (owner/body_ctx/storey)")
+    ref_guid = sug.get("reference_guid") or sug.get("target_guid")
+    ref = ifc_file.by_guid(ref_guid) if ref_guid else None
+    if ref is None:
+        raise ValueError(f"Referans GUID bulunamadı: {ref_guid}")
+
+    ref_x, ref_y = _world_xy_of(ref)
+    dx, dy = _ref_dir_xy_of(ref)
+    # Kapı için: dik yönü hesapla (perpendicular). Yoksa kendi referans yönünde.
+    nx, ny = -dy, dx
+    offset = float(sug.get("offset", 0.5) or 0.5)
+    cx = ref_x + nx * offset
+    cy = ref_y + ny * offset
+
+    sz = sug.get("obstruction_size") or [0.30, 0.30, 2.50]
+    sx = float(sz[0]) if len(sz) > 0 else 0.30
+    sy = float(sz[1]) if len(sz) > 1 else 0.30
+    sh = float(sz[2]) if len(sz) > 2 else 2.50
+
+    name = f"Obstacle [auto] near {getattr(ref, 'Name', None) or ref.is_a()}"
+    column = _add_column_obstruction(
+        ifc_file, owner, body_ctx, storey, cx, cy,
+        size_x=sx, size_y=sy, height=sh, name=name,
+    )
+    return {
+        "ifc_global_id": column.GlobalId,
+        "ifc_type": "IfcColumn",
+        "ifc_name": name,
+        "attribute": "[ADDED]",
+        "value_before": None,
+        "value_after": f"IfcColumn size=({sx},{sy},{sh}) at ({cx:.2f},{cy:.2f}) "
+                        f"offset={offset} near {ref.GlobalId}",
+    }
+
+
 def inject_violations(
     *,
     baseline_id: str,
@@ -191,32 +376,43 @@ def inject_violations(
             labels.append({**_label_base(v), "status": "skipped",
                            "reason": sug.get("reason") or "uygulanabilir hedef yok",
                            "is_decoy": False,
+                           "action": sug.get("action") or "modify_attribute",
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
 
+        action = sug.get("action") or "modify_attribute"
         try:
-            before, after = _apply_edit(src, sug["target_guid"],
-                                        sug["attribute"], sug["new_value"])
+            if action == "add_obstruction":
+                info = _apply_add_obstruction(src, sug)
+                lbl_extra = info
+            else:
+                # default: modify_attribute
+                before, after = _apply_edit(src, sug["target_guid"],
+                                             sug["attribute"], sug["new_value"])
+                target = src.by_guid(sug["target_guid"])
+                lbl_extra = {
+                    "ifc_global_id": sug["target_guid"],
+                    "ifc_type": sug.get("ifc_type") or target.is_a(),
+                    "ifc_name": getattr(target, "Name", None),
+                    "attribute": sug["attribute"],
+                    "value_before": before,
+                    "value_after": after,
+                }
         except Exception as e:
             labels.append({**_label_base(v), "status": "skipped",
                            "reason": f"uygulama hatası: {e}",
-                           "is_decoy": False,
+                           "is_decoy": False, "action": action,
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
 
-        target = src.by_guid(sug["target_guid"])
         labels.append({
             **_label_base(v),
-            "ifc_global_id": sug["target_guid"],
-            "ifc_type": sug.get("ifc_type") or target.is_a(),
-            "ifc_name": getattr(target, "Name", None),
-            "attribute": sug["attribute"],
-            "value_before": before,
-            "value_after": after,
+            **lbl_extra,
             "status": "applied",
             "is_decoy": False,
+            "action": action,
             "reason": sug.get("rationale"),
             "applied_at": datetime.utcnow().isoformat(timespec="seconds"),
         })
@@ -252,6 +448,7 @@ def inject_violations(
                 "value_after": None,
                 "status": "decoy",
                 "is_decoy": True,
+                "action": "decoy",
                 "reason": "Sahte (honeypot) etiket — gerçek ihlal değil; "
                           "test için yerleştirildi.",
                 "applied_at": datetime.utcnow().isoformat(timespec="seconds"),
