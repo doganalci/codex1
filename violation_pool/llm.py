@@ -159,7 +159,9 @@ def generate_rag(
 def default_prompt_for(method: str) -> str:
     from .config import METHOD_NAIVE
     return NAIVE_PROMPT if method == METHOD_NAIVE else (
-        "Yapı denetim mevzuatı kapsamında ihlal kuralları üret. "
-        "Erişilebilirlik, yangın güvenliği, statik, elektrik, mekanik "
-        "alanlarını kapsayacak şekilde geniş bir liste hazırla."
+        "Yapılı çevrede erişilebilirlik ve kullanılabilirlik ihlali kuralları "
+        "üret. Kapı/koridor, rampa, merdiven, korkuluk/küpeşte, asansör, "
+        "tuvalet/banyo, otopark, uyarı yüzeyleri, yönlendirme/işaretleme, "
+        "kontrast ve aydınlatma, manevra alanları, eşik/kot farkları gibi "
+        "alanları geniş biçimde kapsa."
     )
