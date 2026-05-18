@@ -16,7 +16,8 @@ import pandas as pd
 import streamlit as st
 
 from violation_pool import (
-    excel_export, finetune, ifc_gen, ifc_inject, ifc_viewer, llm, rag, storage,
+    excel_export, finetune, graph_viewer, ifc_gen, ifc_graph, ifc_inject,
+    ifc_viewer, llm, rag, storage,
 )
 from violation_pool.config import (
     METHOD_FINETUNE,
@@ -667,36 +668,81 @@ with top_ifc:
                     st.markdown("**İhlal etiketleri**")
                     st.dataframe(ldf, use_container_width=True)
 
-            # ---- 3D görselleştirme ----
-            with st.expander("3D görselleştir", expanded=False):
-                vc1, vc2 = st.columns([1, 3])
-                max_el = vc1.number_input(
-                    "Maks. eleman", 100, 20000, 5000, step=100, key=f"max_el_{sel}",
-                )
-                highlight = vc2.checkbox(
-                    "İhlal edilen elemanları kırmızı vurgula",
-                    value=True, key=f"hl_{sel}", disabled=(kind != "violated"),
-                )
-                if st.button("Çiz", key=f"draw_{sel}"):
-                    hl_guids = (
-                        {l["ifc_global_id"] for l in labs
-                         if l.get("status") == "applied" and l.get("ifc_global_id")}
-                        if highlight and kind == "violated" else set()
+            # ---- Görselleştirme: 3D IFC ve Graph ----
+            hl_guids = (
+                {l["ifc_global_id"] for l in labs
+                 if l.get("status") == "applied" and l.get("ifc_global_id")}
+                if kind == "violated" else set()
+            )
+            with st.expander("Görselleştir (3D IFC · Graph)", expanded=False):
+                view_3d, view_graph = st.tabs(["3D IFC", "Graph"])
+
+                with view_3d:
+                    vc1, vc2 = st.columns([1, 3])
+                    max_el = vc1.number_input(
+                        "Maks. eleman", 100, 20000, 5000, step=100, key=f"max_el_{sel}",
                     )
-                    try:
-                        with st.spinner("Geometri tessellate ediliyor..."):
-                            fig, stats = ifc_viewer.ifc_to_figure(
-                                m["file_path"],
-                                highlight_guids=hl_guids,
-                                max_elements=int(max_el),
+                    highlight = vc2.checkbox(
+                        "Modifiye/eklenen elemanları kırmızı vurgula",
+                        value=True, key=f"hl_{sel}", disabled=(kind != "violated"),
+                    )
+                    if st.button("3D çiz", key=f"draw3d_{sel}"):
+                        try:
+                            with st.spinner("Geometri tessellate ediliyor..."):
+                                fig, stats = ifc_viewer.ifc_to_figure(
+                                    m["file_path"],
+                                    highlight_guids=hl_guids if highlight else set(),
+                                    max_elements=int(max_el),
+                                )
+                            st.caption(
+                                f"Çizilen eleman: {stats['drawn']}  ·  atlanan: {stats['skipped']}"
+                                + (f"  ·  vurgulanan: {len(hl_guids)}" if hl_guids and highlight else "")
                             )
-                        st.caption(
-                            f"Çizilen eleman: {stats['drawn']}  ·  atlanan: {stats['skipped']}"
-                            + (f"  ·  vurgulanan: {len(hl_guids)}" if hl_guids else "")
+                            st.plotly_chart(fig, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"3D görselleştirme hatası: {e}")
+
+                with view_graph:
+                    gpath = m.get("graph_path")
+                    if not gpath or not Path(gpath).exists():
+                        st.info("Bu IFC için graph kaydedilmemiş.")
+                        if st.button("Şimdi üret ve kaydet", key=f"gbuild_{sel}"):
+                            try:
+                                base_dir = Path(m["file_path"]).with_suffix("")
+                                gp = base_dir.with_suffix(".graph.json")
+                                ifc_graph.build_and_save(m["file_path"], gp)
+                                storage.set_ifc_graph_path(sel, str(gp))
+                                st.success(f"Graph üretildi: {gp}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Graph üretme hatası: {e}")
+                    else:
+                        hl_graph = st.checkbox(
+                            "Modifiye/eklenen düğümleri vurgula",
+                            value=True, key=f"hlg_{sel}",
+                            disabled=(kind != "violated"),
                         )
-                        st.plotly_chart(fig, use_container_width=True)
-                    except Exception as e:
-                        st.error(f"Görselleştirme hatası: {e}")
+                        if st.button("Graph çiz", key=f"drawg_{sel}"):
+                            try:
+                                with st.spinner("Graph çiziliyor..."):
+                                    g = ifc_graph.load_graph(gpath)
+                                    gfig = graph_viewer.graph_to_figure(
+                                        g,
+                                        highlight_guids=(hl_guids if hl_graph else set()),
+                                    )
+                                st.caption(
+                                    f"Düğüm: {g.number_of_nodes()}  ·  "
+                                    f"kenar: {g.number_of_edges()}"
+                                    + (f"  ·  vurgulanan: {len(hl_guids)}" if hl_guids and hl_graph else "")
+                                )
+                                st.plotly_chart(gfig, use_container_width=True)
+                            except Exception as e:
+                                st.error(f"Graph görselleştirme hatası: {e}")
+                        with open(gpath, "rb") as f:
+                            st.download_button(
+                                "Graph JSON indir", f,
+                                file_name=Path(gpath).name, key=f"dlg_{sel}",
+                            )
 
             if st.button("Bu kaydı sil", key=f"del_ifc_{sel}"):
                 storage.delete_ifc_model(sel)

@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS ifc_models (
     file_path TEXT NOT NULL,
     meta_path TEXT,
     labels_path TEXT,
+    graph_path TEXT,
     status TEXT NOT NULL,           -- 'ok' | 'invalid' | 'partial'
     error TEXT,
     created_at TEXT NOT NULL
@@ -114,6 +115,9 @@ def init_db() -> None:
         vcols = {r["name"] for r in c.execute("PRAGMA table_info(violations)").fetchall()}
         if "batch_no" not in vcols:
             c.execute("ALTER TABLE violations ADD COLUMN batch_no INTEGER NOT NULL DEFAULT 1")
+        icols = {r["name"] for r in c.execute("PRAGMA table_info(ifc_models)").fetchall()}
+        if icols and "graph_path" not in icols:
+            c.execute("ALTER TABLE ifc_models ADD COLUMN graph_path TEXT")
 
 
 def now() -> str:
@@ -282,21 +286,28 @@ def create_ifc_model(
     labels_path: str | None,
     status: str,
     error: str | None = None,
+    graph_path: str | None = None,
 ) -> str:
     mid = str(uuid.uuid4())
     with _conn() as c:
         c.execute(
             """INSERT INTO ifc_models(id, kind, name, parent_id, llm_model, prompt,
                pool_run_id, params_json, file_path, meta_path, labels_path,
-               status, error, created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               graph_path, status, error, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 mid, kind, name, parent_id, llm_model, prompt, pool_run_id,
                 json.dumps(params or {}, ensure_ascii=False),
-                file_path, meta_path, labels_path, status, error, now(),
+                file_path, meta_path, labels_path, graph_path,
+                status, error, now(),
             ),
         )
     return mid
+
+
+def set_ifc_graph_path(ifc_id: str, graph_path: str) -> None:
+    with _conn() as c:
+        c.execute("UPDATE ifc_models SET graph_path=? WHERE id=?", (graph_path, ifc_id))
 
 
 def list_ifc_models(kind: str | None = None) -> list[dict]:

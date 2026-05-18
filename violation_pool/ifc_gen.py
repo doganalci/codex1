@@ -126,14 +126,25 @@ def generate_baseline(
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    graph_path: str | None = None
+    if status == "ok":
+        try:
+            from . import ifc_graph
+            gp = out_dir / f"{ifc_id}.graph.json"
+            ifc_graph.build_and_save(ifc_path, gp)
+            graph_path = str(gp)
+        except Exception:
+            graph_path = None
+
     mid = storage.create_ifc_model(
         kind="baseline", name=name, parent_id=None,
         llm_model=model, prompt=seed_prompt, pool_run_id=None,
         params=None, file_path=str(ifc_path), meta_path=str(meta_path),
-        labels_path=None, status=status, error=err,
+        labels_path=None, graph_path=graph_path, status=status, error=err,
     )
     return {"ifc_model_id": mid, "ifc_path": str(ifc_path),
-            "meta_path": str(meta_path), "status": status, "error": err}
+            "meta_path": str(meta_path), "graph_path": graph_path,
+            "status": status, "error": err}
 
 
 def generate_baselines(

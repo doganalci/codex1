@@ -9,3 +9,4 @@ tiktoken>=0.7
 ifcopenshell>=0.7
 plotly>=5.20
 numpy>=1.26
+networkx>=3.2

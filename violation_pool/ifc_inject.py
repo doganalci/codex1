@@ -230,12 +230,22 @@ def inject_violations(
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     status = "ok" if applied > 0 and skipped == 0 else ("partial" if applied > 0 else "invalid")
+
+    graph_path: str | None = None
+    try:
+        from . import ifc_graph
+        gp = out_dir / f"{out_id}.graph.json"
+        ifc_graph.build_and_save(out_ifc, gp)
+        graph_path = str(gp)
+    except Exception:
+        graph_path = None
+
     mid = storage.create_ifc_model(
         kind="violated", name=base["name"] + ".violated", parent_id=baseline_id,
         llm_model=model, prompt=None, pool_run_id=pool_run_id,
         params={"summary": summary, "selection_filter": selection_filter or {}},
         file_path=str(out_ifc), meta_path=str(out_meta), labels_path=str(out_lab),
-        status=status, error=None,
+        graph_path=graph_path, status=status, error=None,
     )
     storage.add_ifc_labels(mid, labels)
     return {
