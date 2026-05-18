@@ -24,11 +24,13 @@ _EDGE_COLORS = {
 def graph_to_figure(
     g: nx.MultiDiGraph,
     highlight_guids: Iterable[str] | None = None,
+    decoy_guids: Iterable[str] | None = None,
     seed: int = 7,
 ):
     import plotly.graph_objects as go
 
     hl = set(highlight_guids or [])
+    dc = set(decoy_guids or []) - hl  # highlight her zaman önce gelir
 
     if g.number_of_nodes() == 0:
         raise ValueError("Boş graf.")
@@ -75,12 +77,13 @@ def graph_to_figure(
         ))
 
     # Nodes
-    node_x, node_y, txt, hover, sizes, colors, edges = [], [], [], [], [], [], []
+    node_x, node_y, txt, hover, sizes, colors, borders = [], [], [], [], [], [], []
     deg = dict(simple.degree())
     for n, d in g.nodes(data=True):
         x, y = pos[n]
         node_x.append(x); node_y.append(y)
         is_hl = n in hl
+        is_decoy = n in dc
         attrs = d.get("attributes", {}) or {}
         psets = d.get("psets", {}) or {}
         h = f"<b>{d.get('ifc_type', '?')}</b><br>guid={n}"
@@ -91,19 +94,35 @@ def graph_to_figure(
         if psets:
             ps_short = "; ".join(list(psets.keys())[:5])
             h += f"<br>psets: {ps_short}"
+        if is_hl:
+            h = "[İHLAL] " + h
+        elif is_decoy:
+            h = "[DECOY] " + h
         hover.append(h)
-        txt.append(d.get("ifc_type", "")[3:] if d.get("ifc_type", "").startswith("Ifc") else d.get("ifc_type", ""))
+        label = d.get("ifc_type", "")
+        if label.startswith("Ifc"):
+            label = label[3:]
+        txt.append(label)
         base = 8 + min(deg.get(n, 0), 20)
-        sizes.append(base + (10 if is_hl else 0))
-        colors.append("#d62728" if is_hl else "#4c78a8")
-        edges.append("#000000" if is_hl else "#1f3a5f")
+        if is_hl:
+            sizes.append(base + 14)
+            colors.append("#e6194b")  # parlak kırmızı
+            borders.append("#000000")
+        elif is_decoy:
+            sizes.append(base + 10)
+            colors.append("#ffbb33")  # sarı-turuncu
+            borders.append("#7a4d00")
+        else:
+            sizes.append(base)
+            colors.append("#4c78a8")  # soluk mavi
+            borders.append("#1f3a5f")
 
     node_trace = go.Scatter(
         x=node_x, y=node_y, mode="markers+text",
         text=txt, textposition="top center",
         textfont=dict(size=9, color="#dddddd"),
         marker=dict(size=sizes, color=colors,
-                    line=dict(width=1.3, color=edges)),
+                    line=dict(width=1.3, color=borders)),
         hovertext=hover, hoverinfo="text",
         name="nodes",
     )
@@ -114,8 +133,9 @@ def graph_to_figure(
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1),
         margin=dict(l=0, r=0, t=10, b=0),
-        height=620,
+        height=680,
         xaxis=dict(visible=False), yaxis=dict(visible=False),
+        dragmode="pan",   # mouse drag = pan
     )
     fig.update_xaxes(scaleanchor="y", scaleratio=1)
     return fig

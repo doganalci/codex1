@@ -738,8 +738,13 @@ with top_ifc:
     # -------- Enjeksiyon --------
     with ifc_t2:
         st.subheader("Baseline'a havuzdan ihlal enjekte et")
+        st.caption(
+            "İhlalleri tek tek seçip aynı anda toplu enjekte edebilirsin. "
+            "İstersen yalancı (decoy) etiketler de eklenir: bunlar gerçek "
+            "ihlal değildir ama işaretli görünür — sistemin gerçekleri "
+            "decoy'lardan ayırma kabiliyetini ölçmek için."
+        )
 
-        # Enjeksiyon kaynağı: baseline + imported (gerçek IFC) — ikisi de OK olmalı
         sources = [m for m in storage.list_ifc_models()
                    if m["kind"] in ("baseline", "imported") and m["status"] == "ok"]
         if not sources:
@@ -756,44 +761,98 @@ with top_ifc:
         sel_pool = st.selectbox("İhlal havuzu (run)", list(po.keys()) or [""],
                                 format_func=lambda k: po.get(k, "-"))
 
-        c1, c2, c3 = st.columns(3)
-        inj_n = c1.number_input("Enjekte edilecek ihlal sayısı", 1, 100, 10)
-        inj_cat = c2.text_input("Kategori filtresi (boş = hepsi)")
-        inj_seed = c3.number_input("Tohum (rastgele seçim)", 0, 10_000, 42)
-        inj_model = st.text_input("Enjeksiyon LLM modeli",
-                                  value=settings.ifc_llm_model)
+        if sel_pool:
+            pool_vs = storage.get_violations(sel_pool)
+            # Kategori filtresi
+            cats = sorted({v.get("category") or "-" for v in pool_vs})
+            f1, f2 = st.columns([1, 2])
+            cat_filter = f1.selectbox("Kategori filtresi", ["(hepsi)"] + cats)
+            sev_filter = f2.multiselect(
+                "Şiddet filtresi (boş = hepsi)",
+                ["düşük", "orta", "yüksek", "kritik"],
+            )
+            filtered = [
+                v for v in pool_vs
+                if (cat_filter == "(hepsi)" or v.get("category") == cat_filter)
+                and (not sev_filter or (v.get("severity") in sev_filter))
+            ]
+            st.caption(f"Filtre sonrası: {len(filtered)} / {len(pool_vs)} ihlal")
 
-        if st.button("İhlal enjekte et", type="primary",
-                     disabled=not (sel_base and sel_pool)):
-            try:
-                pool_vs = storage.get_violations(sel_pool)
-                picked = ifc_inject.pick_violations(
-                    pool_vs, n=int(inj_n),
-                    category=(inj_cat.strip() or None),
-                    seed=int(inj_seed),
+            opt = {
+                v["id"]: f"[{(v.get('category') or '-')}] "
+                          f"{(v.get('title') or v.get('description') or '')[:90]}"
+                          f"  (sev={v.get('severity') or '-'})"
+                for v in filtered
+            }
+
+            # Hızlı seçim
+            qc1, qc2, qc3, qc4 = st.columns(4)
+            if qc1.button("Tümünü seç"):
+                st.session_state["inj_sel"] = list(opt.keys())
+            n_rand = qc2.number_input("Rastgele N", 1,
+                                      max(1, len(filtered)),
+                                      min(10, max(1, len(filtered))),
+                                      key="inj_rand_n")
+            r_seed = qc3.number_input("Tohum", 0, 10_000, 42, key="inj_rand_seed")
+            if qc4.button("Rastgele N seç"):
+                import random as _r
+                _r.seed(int(r_seed))
+                pool_ids = list(opt.keys())
+                st.session_state["inj_sel"] = _r.sample(
+                    pool_ids, min(int(n_rand), len(pool_ids))
                 )
-                if not picked:
-                    st.warning("Filtreyle eşleşen ihlal yok.")
-                    st.stop()
-                with st.spinner(f"{len(picked)} ihlal enjekte ediliyor..."):
-                    out = ifc_inject.inject_violations(
-                        baseline_id=sel_base, violations=picked,
-                        pool_run_id=sel_pool,
-                        model=inj_model.strip() or None,
-                        selection_filter={"category": inj_cat or None,
-                                          "n": int(inj_n),
-                                          "seed": int(inj_seed)},
+
+            selected_ids = st.multiselect(
+                "Enjekte edilecek ihlaller",
+                list(opt.keys()),
+                default=st.session_state.get("inj_sel", []),
+                format_func=lambda i: opt.get(i, i),
+                key="inj_sel_widget",
+            )
+
+            dc1, dc2, dc3 = st.columns(3)
+            decoy_ratio = dc1.slider("Decoy oranı (%)", 0, 100, 20) / 100.0
+            decoy_seed = dc2.number_input("Decoy tohumu", 0, 10_000, 7,
+                                          key="inj_decoy_seed")
+            inj_model = dc3.text_input("Enjeksiyon LLM modeli",
+                                       value=settings.ifc_llm_model)
+
+            ne_real = len(selected_ids)
+            ne_decoys = int(round(ne_real * decoy_ratio))
+            st.caption(
+                f"Seçim: **{ne_real}** gerçek ihlal + **{ne_decoys}** decoy "
+                f"= toplam {ne_real + ne_decoys} işaretli eleman."
+            )
+
+            if st.button("Seçilen ihlalleri enjekte et", type="primary",
+                         disabled=not (sel_base and selected_ids)):
+                try:
+                    picked = [v for v in pool_vs if v["id"] in selected_ids]
+                    with st.spinner(f"{len(picked)} ihlal + decoy ekleniyor..."):
+                        out = ifc_inject.inject_violations(
+                            baseline_id=sel_base, violations=picked,
+                            pool_run_id=sel_pool,
+                            model=inj_model.strip() or None,
+                            selection_filter={
+                                "category": (None if cat_filter == "(hepsi)" else cat_filter),
+                                "severity": sev_filter or None,
+                                "selected_ids": selected_ids,
+                                "decoy_ratio": decoy_ratio,
+                            },
+                            decoy_ratio=decoy_ratio,
+                            decoy_seed=int(decoy_seed),
+                        )
+                    inj_tot = storage.usage_totals(ifc_model_id=out["ifc_model_id"])
+                    s = out["summary"]
+                    st.success(
+                        f"Bitti. Uygulanan: {s['applied']}, "
+                        f"atlanan: {s['skipped']}, decoy: {s['decoys']}. "
+                        f"Token: {inj_tot['total_tokens']:,} "
+                        f"({inj_tot['calls']} çağrı)\n"
+                        f"IFC: {out['ifc_path']}\nLabels: {out['labels_path']}"
                     )
-                inj_tot = storage.usage_totals(ifc_model_id=out["ifc_model_id"])
-                st.success(
-                    f"Bitti. Uygulanan: {out['summary']['applied']}, "
-                    f"atlanan: {out['summary']['skipped']}. "
-                    f"Token: {inj_tot['total_tokens']:,} "
-                    f"({inj_tot['calls']} çağrı)\n"
-                    f"IFC: {out['ifc_path']}\nLabels: {out['labels_path']}"
-                )
-            except Exception as e:
-                st.error(f"Hata: {e}")
+                except Exception as e:
+                    st.error(f"Hata: {e}")
 
     # -------- Görüntüleme --------
     with ifc_t3:
@@ -845,6 +904,7 @@ with top_ifc:
                 labs = storage.get_ifc_labels(sel)
                 if labs:
                     ldf = pd.DataFrame([{
+                        "is_decoy": bool(l.get("is_decoy")),
                         "status": l["status"],
                         "title": l["title"],
                         "category": l["category"],
@@ -856,15 +916,26 @@ with top_ifc:
                         "after": l["value_after"],
                         "reason": l["reason"],
                     } for l in labs])
-                    st.markdown("**İhlal etiketleri**")
+                    n_real = int((~ldf["is_decoy"]).sum())
+                    n_dec = int(ldf["is_decoy"].sum())
+                    st.markdown(
+                        f"**Etiketler** · gerçek ihlal: **{n_real}** · "
+                        f"decoy: **{n_dec}**"
+                    )
                     st.dataframe(ldf, use_container_width=True)
 
             # ---- Görselleştirme: 3D IFC ve Graph ----
-            hl_guids = (
-                {l["ifc_global_id"] for l in labs
-                 if l.get("status") == "applied" and l.get("ifc_global_id")}
-                if kind == "violated" else set()
-            )
+            hl_guids = set()
+            dc_guids = set()
+            if kind == "violated":
+                for l in labs:
+                    g = l.get("ifc_global_id")
+                    if not g:
+                        continue
+                    if l.get("is_decoy") or l.get("status") == "decoy":
+                        dc_guids.add(g)
+                    elif l.get("status") == "applied":
+                        hl_guids.add(g)
             with st.expander("Görselleştir (3D IFC · Graph)", expanded=False):
                 view_3d, view_graph = st.tabs(["3D IFC", "Graph"])
 
@@ -883,13 +954,19 @@ with top_ifc:
                                 fig, stats = ifc_viewer.ifc_to_figure(
                                     m["file_path"],
                                     highlight_guids=hl_guids if highlight else set(),
+                                    decoy_guids=dc_guids if highlight else set(),
                                     max_elements=int(max_el),
                                 )
                             st.caption(
                                 f"Çizilen eleman: {stats['drawn']}  ·  atlanan: {stats['skipped']}"
-                                + (f"  ·  vurgulanan: {len(hl_guids)}" if hl_guids and highlight else "")
+                                + (f"  ·  ihlal: {len(hl_guids)}"
+                                   f"  ·  decoy: {len(dc_guids)}"
+                                   if (hl_guids or dc_guids) and highlight else "")
                             )
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(
+                                fig, use_container_width=True,
+                                config={"scrollZoom": True},
+                            )
                         except Exception as e:
                             st.error(f"3D görselleştirme hatası: {e}")
 
@@ -925,13 +1002,25 @@ with top_ifc:
                                     gfig = graph_viewer.graph_to_figure(
                                         g,
                                         highlight_guids=(hl_guids if hl_graph else set()),
+                                        decoy_guids=(dc_guids if hl_graph else set()),
                                     )
                                 st.caption(
                                     f"Düğüm: {g.number_of_nodes()}  ·  "
                                     f"kenar: {g.number_of_edges()}"
-                                    + (f"  ·  vurgulanan: {len(hl_guids)}" if hl_guids and hl_graph else "")
+                                    + (f"  ·  ihlal: {len(hl_guids)}"
+                                       f"  ·  decoy: {len(dc_guids)}"
+                                       if (hl_guids or dc_guids) and hl_graph else "")
                                 )
-                                st.plotly_chart(gfig, use_container_width=True)
+                                st.info(
+                                    "🖱️ Çekmek için fareyle sürükle (pan modu), "
+                                    "kaydırma tekerleğiyle yakınlaştır.",
+                                    icon="ℹ️",
+                                )
+                                st.plotly_chart(
+                                    gfig, use_container_width=True,
+                                    config={"scrollZoom": True,
+                                            "displaylogo": False},
+                                )
                             except Exception as e:
                                 st.error(f"Graph görselleştirme hatası: {e}")
                         with open(gpath, "rb") as f:

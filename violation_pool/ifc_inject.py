@@ -146,13 +146,17 @@ def inject_violations(
     pool_run_id: str | None,
     model: str | None = None,
     selection_filter: dict | None = None,
+    decoy_ratio: float = 0.20,
+    decoy_seed: int | None = None,
 ) -> dict:
     """violations: havuzdan seçilmiş ihlal dict'leri (storage.get_violations
     çıktısı formatı).
-    selection_filter: {"category": "Erişilebilirlik"} veya {"types": ["IfcDoor"]}
-       — şimdilik bilgi amaçlı, label'a yazılır.
+    decoy_ratio: gerçek ihlal sayısının yüzdesi kadar SAHTE (decoy) etiket
+        eklenir. IFC modifiye edilmez; etiket "ihlal değil" olarak işaretlenir.
+        Test amaçlı (downstream sistem decoy'u gerçek ihlalden ayırabiliyor mu?).
     """
     import ifcopenshell  # local import
+    import random
 
     model = model or settings.ifc_llm_model
     base = storage.get_ifc_model(baseline_id)
@@ -168,7 +172,6 @@ def inject_violations(
     out_ifc = out_dir / f"{out_id}.ifc"
     out_lab = out_dir / f"{out_id}.labels.json"
     out_meta = out_dir / f"{out_id}.meta.json"
-    # Yeni violated IFC için inject çağrılarını da bu id'ye eşle
     inject_meta_ifc_id = out_id
 
     labels: list[dict] = []
@@ -179,7 +182,7 @@ def inject_violations(
             sug = _propose_edit(v, cat, model, usage_meta=inject_meta)
         except Exception as e:
             labels.append({**_label_base(v), "status": "skipped",
-                           "reason": f"LLM hata: {e}",
+                           "reason": f"LLM hata: {e}", "is_decoy": False,
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
@@ -187,6 +190,7 @@ def inject_violations(
         if not sug.get("applicable"):
             labels.append({**_label_base(v), "status": "skipped",
                            "reason": sug.get("reason") or "uygulanabilir hedef yok",
+                           "is_decoy": False,
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
@@ -197,6 +201,7 @@ def inject_violations(
         except Exception as e:
             labels.append({**_label_base(v), "status": "skipped",
                            "reason": f"uygulama hatası: {e}",
+                           "is_decoy": False,
                            "applied_at": datetime.utcnow().isoformat(timespec="seconds")})
             skipped += 1
             continue
@@ -211,14 +216,53 @@ def inject_violations(
             "value_before": before,
             "value_after": after,
             "status": "applied",
+            "is_decoy": False,
             "reason": sug.get("rationale"),
             "applied_at": datetime.utcnow().isoformat(timespec="seconds"),
         })
         applied += 1
 
+    # ----- Decoys (sahte ihlaller) -----
+    decoys_added = 0
+    decoy_ratio = max(0.0, float(decoy_ratio or 0.0))
+    n_decoys_target = int(round(len(violations) * decoy_ratio))
+    if n_decoys_target > 0 and cat:
+        rng = random.Random(decoy_seed)
+        used = {l.get("ifc_global_id") for l in labels
+                if l.get("status") == "applied" and l.get("ifc_global_id")}
+        cand = [c for c in cat if c.get("guid") and c["guid"] not in used
+                # Sadece görsel olarak anlamlı eleman tipleri
+                and c["type"] in ("IfcDoor", "IfcWindow", "IfcWall",
+                                  "IfcWallStandardCase", "IfcSlab",
+                                  "IfcStair", "IfcRailing", "IfcRamp")]
+        rng.shuffle(cand)
+        for c in cand[:n_decoys_target]:
+            labels.append({
+                "violation_id": None,
+                "title": f"[DECOY] Sahte etiket: {c['type']}",
+                "category": "Decoy",
+                "severity": None,
+                "threshold": None,
+                "evidence": [],
+                "ifc_global_id": c["guid"],
+                "ifc_type": c["type"],
+                "ifc_name": c.get("name"),
+                "attribute": None,
+                "value_before": None,
+                "value_after": None,
+                "status": "decoy",
+                "is_decoy": True,
+                "reason": "Sahte (honeypot) etiket — gerçek ihlal değil; "
+                          "test için yerleştirildi.",
+                "applied_at": datetime.utcnow().isoformat(timespec="seconds"),
+            })
+            decoys_added += 1
+
     src.write(str(out_ifc))
 
-    summary = {"requested": len(violations), "applied": applied, "skipped": skipped}
+    summary = {"requested": len(violations), "applied": applied,
+               "skipped": skipped, "decoys": decoys_added,
+               "decoy_ratio": decoy_ratio}
     labels_doc = {
         "ifc_file": out_ifc.name,
         "baseline_id": baseline_id,

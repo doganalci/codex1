@@ -21,6 +21,7 @@ def _import_geom():
 def ifc_to_figure(
     ifc_path: str | Path,
     highlight_guids: set[str] | None = None,
+    decoy_guids: set[str] | None = None,
     max_elements: int = 5000,
 ):
     """IFC dosyasından plotly Figure üret. ImportError/RuntimeError'da
@@ -50,6 +51,7 @@ def ifc_to_figure(
         pass
 
     highlight_guids = set(highlight_guids or [])
+    decoy_guids = set(decoy_guids or [])
     meshes = []
     count = 0
     skipped = 0
@@ -74,14 +76,22 @@ def ifc_to_figure(
         jj = faces[1::3]
         kk = faces[2::3]
         is_hl = p.GlobalId in highlight_guids
+        is_decoy = p.GlobalId in decoy_guids and not is_hl
+        if is_hl:
+            color, opacity, tag = "#e6194b", 1.0, "[İHLAL]"   # parlak kırmızı
+        elif is_decoy:
+            color, opacity, tag = "#ffbb33", 1.0, "[DECOY]"   # sarı-turuncu
+        else:
+            color, opacity, tag = "#9fb3c8", 0.25, ""          # soluk gri
         meshes.append(
             go.Mesh3d(
                 x=xs, y=ys, z=zs, i=ii, j=jj, k=kk,
-                color="#d62728" if is_hl else "#9fb3c8",
-                opacity=0.95 if is_hl else 0.45,
-                flatshading=True,
+                color=color, opacity=opacity, flatshading=True,
                 name=f"{p.is_a()}",
-                hovertext=f"{p.is_a()} · {p.GlobalId} · {getattr(p, 'Name', '') or ''}",
+                hovertext=(
+                    f"{tag} {p.is_a()} · {p.GlobalId} · "
+                    f"{getattr(p, 'Name', '') or ''}"
+                ),
                 hoverinfo="text",
                 showscale=False,
             )
