@@ -17,7 +17,7 @@ import streamlit as st
 
 from violation_pool import (
     excel_export, finetune, graph_viewer, ifc_gen, ifc_graph, ifc_inject,
-    ifc_viewer, llm, rag, storage,
+    ifc_viewer, llm, pipeline, rag, storage,
 )
 from violation_pool.config import (
     METHOD_FINETUNE,
@@ -575,9 +575,10 @@ with tab_tok:
 
 
 with top_ifc:
-    ifc_t1, ifc_t1b, ifc_t2, ifc_t3 = st.tabs(
+    ifc_t1, ifc_t1b, ifc_t2, ifc_tpipe, ifc_t3 = st.tabs(
         ["Baseline IFC üret", "Gerçek IFC içe aktar",
-         "İhlal enjekte et", "IFC'leri görüntüle"]
+         "İhlal enjekte et", "Otomatik Dataset",
+         "IFC'leri görüntüle"]
     )
 
     # -------- Baseline üretimi --------
@@ -874,6 +875,159 @@ with top_ifc:
                     )
                 except Exception as e:
                     st.error(f"Hata: {e}")
+
+    # -------- Otomatik Dataset Pipeline --------
+    with ifc_tpipe:
+        st.subheader("Otomatik Dataset Üretimi (uçtan uca)")
+        st.caption(
+            "Tek tıkla **N baseline × M varyant** ihlalli IFC üretir. "
+            "Her varyant farklı tohumla farklı rastgele ihlaller alır + "
+            "yapılandırılan oranda decoy etiketler. Uzun çalışır; tarayıcı "
+            "sekmesi açık kalsın."
+        )
+
+        # Pool seç
+        saved_pools = [r for r in storage.list_runs() if r["status"] == "saved"]
+        if not saved_pools:
+            st.warning("Önce bir kayıtlı ihlal havuzu lazım.")
+        ppo = {r["id"]: f"{r['name']} · {METHOD_LABELS.get(r['method'], r['method'])}"
+               for r in saved_pools}
+        pipe_pool = st.selectbox(
+            "Havuz", list(ppo.keys()) or [""],
+            format_func=lambda k: ppo.get(k, "-"),
+            key="pipe_pool",
+        )
+
+        # Baseline kaynağı
+        bsource = st.radio(
+            "Baseline kaynağı",
+            ["Yeni üret", "Mevcutları kullan"],
+            horizontal=True, key="pipe_bsrc",
+        )
+
+        existing_ids: list[str] = []
+        n_baselines = 4
+        baseline_seed_prompt = ""
+        if bsource == "Yeni üret":
+            cn1, cn2 = st.columns(2)
+            n_baselines = cn1.number_input("Yeni baseline sayısı",
+                                            1, 50, 4, key="pipe_n_base")
+            name_prefix = cn2.text_input("İsim öneki", value="Auto",
+                                          key="pipe_prefix")
+            baseline_seed_prompt = st.text_area(
+                "Baseline genel promtu (her birine uygulanır)",
+                value=("Erişilebilirlik ve kullanılabilirlik açısından "
+                       "sorunsuz, mevzuata fazlasıyla uygun küçük bir konut "
+                       "spec'i üret."),
+                height=70, key="pipe_bprompt",
+            )
+            with st.expander("Program varyasyonları (cyclic)",
+                              expanded=False):
+                vtext = st.text_area(
+                    "Varyasyonlar",
+                    value="\n".join(ifc_gen.DEFAULT_VARIATIONS),
+                    height=180, key="pipe_vars",
+                )
+                variations = [v.strip() for v in vtext.split("\n") if v.strip()]
+        else:
+            variations = None
+            name_prefix = "Auto"
+            existing = [m for m in storage.list_ifc_models()
+                        if m["kind"] in ("baseline", "imported")
+                        and m["status"] == "ok"]
+            opt_ex = {m["id"]: f"[{m['kind']}] {m['name']}"
+                      for m in existing}
+            existing_ids = st.multiselect(
+                "Kullanılacak baseline/imported IFC'ler",
+                list(opt_ex.keys()),
+                format_func=lambda k: opt_ex[k],
+                key="pipe_existing",
+            )
+
+        # Varyant + ihlal parametreleri
+        cp1, cp2, cp3 = st.columns(3)
+        variants = cp1.number_input("Her baseline için varyant sayısı",
+                                     1, 50, 3, key="pipe_var_n")
+        vio_per = cp2.number_input("Her varyantta ihlal sayısı",
+                                    1, 100, 10, key="pipe_vio_per")
+        pipe_decoy = cp3.slider("Decoy %", 0, 100, 20,
+                                 key="pipe_decoy") / 100.0
+        cp4, cp5 = st.columns(2)
+        pipe_ifc_model = cp4.text_input("Baseline LLM modeli",
+                                         value=settings.ifc_llm_model,
+                                         key="pipe_ifc_model")
+        pipe_inj_model = cp5.text_input("Enjeksiyon LLM modeli",
+                                         value=settings.ifc_llm_model,
+                                         key="pipe_inj_model")
+        pipe_fill = st.checkbox(
+            "Uymayan ihlali havuzdan başkasıyla doldur",
+            value=True, key="pipe_fill",
+        )
+
+        # Maliyet/zaman tahmini
+        eff_n_base = len(existing_ids) if bsource == "Mevcutları kullan" else int(n_baselines)
+        est = pipeline.estimate_tokens(
+            n_baselines=eff_n_base,
+            variants_per_baseline=int(variants),
+            violations_per_variant=int(vio_per),
+        )
+        st.info(
+            f"📊 Üretilecek: **{est['violated_ifcs']} ihlalli IFC** "
+            f"(+{eff_n_base} baseline) · "
+            f"~**{est['llm_calls']} LLM çağrısı** · "
+            f"~**{est['estimated_total_tokens']:,} token** "
+            "(çok kaba tahmin, fiili tüketim farklı olabilir)."
+        )
+
+        if st.button("🚀 Pipeline başlat", type="primary",
+                     disabled=not (pipe_pool and (existing_ids or bsource == "Yeni üret"))):
+            prog_bar = st.progress(0.0)
+            status_text = st.empty()
+            log_area = st.empty()
+            log_lines: list[str] = []
+
+            def cb(phase: str, cur: int, total: int, msg: str = ""):
+                pct = (cur / total) if total > 0 else 0
+                prog_bar.progress(min(1.0, pct))
+                line = f"[{phase}] {cur}/{total} {msg}"
+                status_text.text(line)
+                log_lines.append(line)
+                # Son 12 satırı göster
+                log_area.code("\n".join(log_lines[-12:]))
+
+            try:
+                res = pipeline.run_pipeline(
+                    pool_run_id=pipe_pool,
+                    n_baselines=int(n_baselines),
+                    variants_per_baseline=int(variants),
+                    violations_per_variant=int(vio_per),
+                    decoy_ratio=pipe_decoy,
+                    baseline_seed_prompt=baseline_seed_prompt,
+                    baseline_variations=variations,
+                    ifc_model=pipe_ifc_model.strip() or None,
+                    inject_model=pipe_inj_model.strip() or None,
+                    fill_from_pool=pipe_fill,
+                    progress_callback=cb,
+                    name_prefix=name_prefix,
+                    existing_baseline_ids=existing_ids or None,
+                )
+                s = res["summary"]
+                st.success(
+                    f"✓ Pipeline tamamlandı.\n"
+                    f"- Baseline (OK): **{s['baselines_ok']}**\n"
+                    f"- İhlalli IFC üretildi: **{s['variated']}**\n"
+                    f"- Toplam uygulanan ihlal: **{s['total_applied']}**\n"
+                    f"- Yedek havuzdan: **{s['total_replaced_from_pool']}**\n"
+                    f"- Atlanan: **{s['total_skipped']}**\n"
+                    f"- Decoy: **{s['total_decoys']}**\n"
+                    f"- Hata: **{s['errors']}**"
+                )
+                if res["errors"]:
+                    with st.expander(f"Hatalar ({len(res['errors'])})",
+                                      expanded=False):
+                        st.json(res["errors"])
+            except Exception as e:
+                st.error(f"Pipeline hatası: {e}")
 
     # -------- Görüntüleme --------
     with ifc_t3:
