@@ -9,3 +9,5 @@ exports/
 *.sqlite
 *.sqlite-journal
 .streamlit/secrets.toml
+ifc_models/
+*.docx
